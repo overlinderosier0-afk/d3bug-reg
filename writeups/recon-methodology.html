@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>From crt.sh to JS bundles: a practical recon methodology — D3BUG.REG</title>
+<meta name="description" content="How I map an unfamiliar target: subdomain enumeration, bundle collection, and tracing auth flows in minified JavaScript.">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> cat recon-methodology.md &nbsp;·&nbsp; 2026-09-25 &nbsp;·&nbsp; methodology</p>
+  <h1>From crt.sh to JS bundles: a practical recon methodology</h1>
+
+  <p>When I get authorized to test a target, the first hours decide everything.
+  Good recon turns a black box into a map; bad recon turns it into a week of guessing.
+  Here is the exact process I follow, with the commands I actually run.</p>
+
+  <div class="callout">
+    <strong>Scope first.</strong> Everything below assumes written authorization for the
+    target. No scope, no recon — that rule is non-negotiable in my workflow.
+  </div>
+
+  <h2>1. Subdomain enumeration via crt.sh</h2>
+  <p>Certificate Transparency logs are the fastest free source of subdomains.
+  One request, no API key, no rate-limit drama:</p>
+  <pre>curl -s "https://crt.sh/?q=%25.example.com&amp;output=json" \
+  | jq -r '.[].name_value' \
+  | sed 's/\*\.//g' | sort -u &gt; subdomains.txt
+wc -l subdomains.txt</pre>
+  <p>The <code>%.example.com</code> pattern catches nested subdomains too.
+  I keep this list in the engagement folder — it becomes the seed for everything else.</p>
+
+  <h2>2. Separate the living from the dead</h2>
+  <p>A list of 400 subdomains is noise. I resolve each one and keep only what answers.
+  When the local DNS is unreliable (captive portals, filtered resolvers), I resolve
+  over HTTPS instead of fighting the network:</p>
+  <pre>curl -s "https://cloudflare-dns.com/dns-query?name=target.example.com&amp;type=A" \
+  -H "accept: application/dns-json" | jq -r '.Answer[].data'</pre>
+  <p>Then pin the IP with <code>curl --resolve</code> so the rest of the tooling works
+  even when the system resolver is broken.</p>
+
+  <h2>3. Collect the JavaScript bundles</h2>
+  <p>Modern apps ship their logic to the browser. That means the client <em>tells you</em>
+  how the API works — endpoints, parameters, auth flows — if you read the bundles.
+  I fetch the main pages, extract <code>.js</code> URLs, and download them locally:</p>
+  <pre>curl -s https://target.example.com/ \
+  | grep -oE 'src="[^"]+\.js[^"]*"' \
+  | sed 's/src="//;s/"//' &gt; bundles.txt</pre>
+
+  <h2>4. Grep for gold</h2>
+  <p>With the bundles on disk, I hunt for structure with plain string searches
+  before opening any file:</p>
+  <pre>grep -rhoE '"/api/[^"]+"' *.js | sort -u          # endpoints
+grep -rhoE '"https?://[^"]+"' *.js | sort -u        # absolute URLs
+grep -roiE '(oauth|openid|token|refresh)[^"]{0,40}' *.js | sort -u</pre>
+  <p>Keywords that almost always pay off: <code>api/</code>, <code>v1</code>/<code>v2</code>,
+  <code>oauth</code>, <code>prelogin</code>, <code>grant</code>, <code>redirect_uri</code>,
+  <code>client_id</code>. Each hit is a thread to pull.</p>
+
+  <h2>5. Trace the auth flow, don't guess it</h2>
+  <p>Login pages are where the interesting logic lives. Instead of guessing how
+  credentials are transformed, I follow the code path from the submit handler:</p>
+  <ol>
+    <li>Find the login form's submit function (search for <code>password</code> near event listeners).</li>
+    <li>Follow what happens to the password value — hashing? encoding? encryption?</li>
+    <li>Note every network call in order: which endpoints, which parameters, what comes back.</li>
+    <li>Check where tokens and session values end up: memory, storage, URL.</li>
+  </ol>
+  <p>Crypto primitives are easy to spot even minified: <code>CryptoJS</code>,
+  <code>AES</code>, <code>SHA256</code>, <code>MD5</code>, <code>createHash</code>.
+  I map the <em>sequence</em> — input, transforms, output — because the sequence is what
+  matters, not any single function name.</p>
+
+  <h2>6. Probe at a human pace</h2>
+  <p>Once I have candidate endpoints, I test them manually with <code>curl</code> —
+  one request at a time, reading each response. No scanners, no fuzzing wordlists,
+  no automated enumeration. On an authorized engagement this keeps the signal high
+  and the noise (and risk) near zero.</p>
+  <p>A typical probe looks like this: hit the endpoint unauthenticated, then with a
+  valid session, then with mutated parameters — and <em>compare the responses</em>.
+  Identical responses to different inputs usually mean a dead end; different
+  responses mean a thread worth pulling.</p>
+
+  <h2>7. Write it down immediately</h2>
+  <p>The unglamorous step that makes all the others compound. Every endpoint, every
+  observed behavior, every dead end goes into the engagement notes the same day.
+  Two weeks later, "I remember seeing something about a v2 endpoint" is worthless;
+  a dated note is evidence.</p>
+
+  <h2>What this gives you</h2>
+  <p>After this process, I hold a map: the attack surface as the application itself
+  describes it. Most findings I've worked on started as a single odd line in a bundle
+  that only looked odd because I had the full map around it.</p>
+  <p>Recon is not a phase you finish. It is the background process that runs under
+  everything else.</p>
+
+  <div class="callout">
+    <strong>Disclosure note.</strong> Techniques described here are methodology only.
+    Specific findings from live engagements are reported privately to the vendor first
+    and published here only after remediation or explicit permission.
+  </div>
+
+  <a class="back-link" href="index.html">← all write-ups</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>
