@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Write-ups — D3BUG.REG</title>
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> ls ./writeups</p>
+  <h1>Write-ups</h1>
+  <p>Methodology notes, technique breakdowns, and tooling write-ups. Everything here comes from authorized engagements or public, observable behavior — never from live, undisclosed vulnerabilities.</p>
+
+  <h2 class="section-title">All posts</h2>
+  <div class="cards">
+    <a class="card" href="recon-methodology.html">
+      <span class="card-tag">methodology</span>
+      <h3>From crt.sh to JS bundles: a practical recon methodology</h3>
+      <p>How I map an unfamiliar target: subdomain enumeration, bundle collection, and tracing auth flows in minified JavaScript.</p>
+      <span class="card-date">2026-09-25</span>
+    </a>
+    <div class="card card--soon">
+      <span class="card-tag">technique</span>
+      <h3>Tracing client-side crypto in minified bundles</h3>
+      <p>Finding hashing, AES and token logic without source maps — string hunting and call-chain tracing.</p>
+      <span class="card-date">coming soon</span>
+    </div>
+    <div class="card card--soon">
+      <span class="card-tag">tooling</span>
+      <h3>My recon toolkit: curl, jq, and patience</h3>
+      <p>The small, boring commands that do most of the work — DoH resolution, pinned IPs, and honest note-taking.</p>
+      <span class="card-date">coming soon</span>
+    </div>
+  </div>
+
+  <a class="back-link" href="../index.html">← back home</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>
