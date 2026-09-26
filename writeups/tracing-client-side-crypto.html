@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tracing client-side crypto in minified bundles — D3BUG.REG</title>
+<meta name="description" content="Finding hashing, AES and token logic in shipped JavaScript: string hunting, submit-handler tracing, and mapping the transform chain. Methodology only.">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> cat tracing-client-side-crypto.md &nbsp;·&nbsp; 2026-09-26 &nbsp;·&nbsp; technique</p>
+  <h1>Tracing client-side crypto in minified bundles</h1>
+
+  <p>Login forms almost never send your password as-is. Hashing, salting,
+  encryption, token assembly — modern frontends transform credentials in the
+  browser before anything hits the wire. That logic is shipped to every visitor
+  in the JavaScript bundle, which makes it public documentation of how auth
+  works. Here is how I read it, step by step, without source maps.</p>
+
+  <div class="callout">
+    <strong>Scope first.</strong> Everything below assumes written authorization for the
+    target. No scope, no recon — that rule is non-negotiable in my workflow.
+  </div>
+
+  <h2>1. Get the bundles and pretty-print them</h2>
+  <p>Never read minified code in the browser debugger if you can avoid it.
+  Download the bundles, keep a pristine copy, and work on formatted copies:</p>
+  <pre>mkdir -p bundles && cd bundles
+curl -s https://target.example.com/login | grep -oE 'src="[^"]+\.js' ...
+# (bundle extraction as covered in the recon write-up)
+npx prettier --write '*.js'        # or: js-beautify, the point is readability</pre>
+  <p>Minified identifiers like <code>a</code>, <code>t</code>, <code>e</code> stay ugly,
+  but string literals never lie. That is where the hunt starts.</p>
+
+  <h2>2. Hunt the primitives first</h2>
+  <p>Before opening a single file, search for crypto vocabulary across everything.
+  The hits cluster around the functions that matter:</p>
+  <pre>grep -rhoE '(CryptoJS|crypto-js)' *.js | sort -u
+grep -rhoE '(AES|SHA256|SHA-256|SHA512|MD5|Hmac|PBKDF2)' *.js | sort -u
+grep -rhoiE '(createHash|createHmac|subtle\.digest|getRandomValues)' *.js | sort -u
+grep -rhoE '"(mode|padding|iv|salt)[^"]{0,30}' *.js | sort -u</pre>
+  <p>Each hit gives you a file and a neighborhood. <code>CryptoJS.AES.encrypt</code> in
+  <code>chunk-vendors.js</code> is the library itself — boring. The same string one file
+  over, next to <code>/api/login</code>, is the application code calling it. Follow the
+  callers, not the library.</p>
+
+  <h2>3. Find the submit handler</h2>
+  <p>Anchor on the login form. Search for <code>password</code> next to event
+  wiring — <code>addEventListener</code>, <code>onClick</code>,
+  <code>onSubmit</code>, <code>.submit</code>. You are looking for the function that
+  reads the password field, because everything downstream of it is the transform chain:</p>
+  <pre>grep -rn 'password' login.js | grep -iE '(listener|submit|click|form)' | head -20</pre>
+  <p>Once you have the handler, read it line by line. It usually does three things:
+  validate, transform, send. The middle part is your target.</p>
+
+  <h2>4. Walk the chain backward from the network call</h2>
+  <p>Find the <code>fetch</code>/<code>axios</code>/<code>xhr</code> that posts to the
+  login endpoint, then trace each parameter backward to its origin. A typical chain
+  reads like this in pseudocode:</p>
+  <pre>h1 = sha256(password)            # first transform
+h2 = sha256(h1 + salt)           # salt arrives from an earlier prelogin call
+payload = aesEncrypt(h2, key)    # final value sent as the password parameter</pre>
+  <p>This is a <em>generic illustration</em>, not any real target's logic. What you
+  are after in real code is the same skeleton: inputs (password, salts, timestamps,
+  nonces), transforms in order, and the final value that goes on the wire. Salt
+  values often come from a <code>/prelogin</code>-style endpoint — check the network
+  tab to confirm which response feeds the code.</p>
+
+  <h2>5. Confirm on the wire</h2>
+  <p>Code reading is a hypothesis; the network tab is the test. Type a known
+  password into the login form, capture the outgoing request, and check that the
+  parameters match what your reading predicted. If the code says the client hashes
+  twice and the request body carries a 64-hex-char value, your map is right.</p>
+  <p>One request at a time, human pace. You are observing the app's normal behavior,
+  not hammering anything.</p>
+
+  <h2>6. Write down the map</h2>
+  <p>Record the chain exactly: endpoint sequence, parameter names, transform order,
+  where salts and keys come from, where the session value lands afterward (memory,
+  storage, redirect URL). This map becomes the reference for everything later —
+  reproducing steps in a disclosure report, understanding a session flow, or
+  simply not re-reading the same bundle twice.</p>
+
+  <h2>What this gives you</h2>
+  <p>A precise understanding of the auth design as the client implements it —
+  which the vendor's docs may not describe. That understanding is what turns a
+  vague "something odd in the login flow" into a clear, reproducible report the
+  vendor can act on. The bundle told you everything; you just had to read it
+  like prose.</p>
+
+  <div class="callout">
+    <strong>Disclosure note.</strong> Techniques described here are methodology only.
+    Specific findings from live engagements are reported privately to the vendor first
+    and published here only after remediation or explicit permission.
+  </div>
+
+  <a class="back-link" href="index.html">← all write-ups</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>
