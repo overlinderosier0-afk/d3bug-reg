@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>My recon toolkit: curl, jq, and patience — D3BUG.REG</title>
+<meta name="description" content="The small, boring commands that do most of my recon work: curl with custom headers, jq filters, grep endpoint extraction, DoH resolution, and honest dated notes.">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> cat recon-toolkit-curl-jq.md &nbsp;·&nbsp; 2026-09-27 &nbsp;·&nbsp; tooling</p>
+  <h1>My recon toolkit: curl, jq, and patience</h1>
+
+  <p>People expect a long list of exotic scanners. My actual toolkit fits in one line:
+  <code>curl</code>, <code>jq</code>, <code>grep</code>, and the discipline to read
+  every response. Nothing in this post is a vulnerability claim and nothing here is
+  new — it is just the set of small commands that does most of the real work, plus
+  the habit that makes them compound.</p>
+
+  <div class="callout">
+    <strong>Scope first.</strong> Everything here assumes written authorization for the
+    target. No scope, no recon.
+  </div>
+
+  <h2>curl: the whole request, on purpose</h2>
+  <p>A browser hides half of what matters. With <code>curl</code> I build the request
+  myself — headers, method, data — and I see exactly what comes back, headers included.
+  This is how I probe one endpoint at a time, at a human pace:</p>
+  <pre>$ curl -s -i https://target.example.com/api/v1/hotQuestions?frontendId=100 \
+  -H "User-Agent: Mozilla/5.0" \
+  -H "Accept: application/json"
+
+HTTP/2 200
+content-type: application/json
+...response body...</pre>
+  <p>The flags that pay off most: <code>-s</code> (silent, no progress meter),
+  <code>-i</code> (show response headers — status, content type, rate-limit headers),
+  <code>-v</code> (full handshake detail when something behaves oddly), and
+  <code>-o file</code> to save bodies for later diffing. When the local resolver is
+  broken or filtered, I pin the IP directly instead of fighting DNS:</p>
+  <pre>$ curl -s https://target.example.com/api/health \
+  --resolve target.example.com:443:203.0.113.10 \
+  -w "\nHTTP %{http_code} in %{time_total}s\n"</pre>
+  <p>The <code>-w</code> format prints the status code and timing on its own line —
+  a cheap habit that makes every probe comparable.</p>
+
+  <h2>jq: the JSON shovel</h2>
+  <p>APIs return nested JSON and I want the interesting field, not the whole dump.
+  <code>jq</code> turns a wall of braces into a one-line answer:</p>
+  <pre>$ curl -s "https://target.example.com/api/v1/items?limit=50" \
+  | jq -r '.data.items[] | [.id, .name, .status] | @tsv'
+
+1234    Widget A    active
+1235    Widget B    pending</pre>
+  <p>Three patterns I use constantly: <code>jq '.something.nested'</code> to navigate,
+  <code>jq -r</code> for raw output without quotes, and <code>jq 'keys'</code> to
+  discover the shape of a response I've never seen before. Combined with
+  <code>grep</code> and <code>sort -u</code>, a JSON endpoint becomes an inventory
+  in one pipe.</p>
+
+  <h2>grep: hunting endpoints in plain sight</h2>
+  <p>Once bundles are saved locally, string search beats cleverness. Before I open
+  any file, I pull the structure out with recursive patterns:</p>
+  <pre>$ grep -rhoE '"/api/[^"]+"' js/ | sort -u | head -30
+"/api/login"
+"/api/prelogin"
+"/api/universal/oauth"
+...
+
+$ grep -rhoE '"https?://[^"]+"' js/ | sort -u</pre>
+  <p>The <code>-o</code> flag prints only the matching part, <code>-r</code> walks the
+  directory, and <code>sort -u</code> deduplicates. Within a minute I have the endpoint
+  list, the absolute URLs, and a pile of keywords — <code>prelogin</code>,
+  <code>grant</code>, <code>redirect_uri</code>, <code>client_id</code> — each one
+  a thread to pull. No source maps needed.</p>
+
+  <h2>When DNS lies: resolve over HTTPS</h2>
+  <p>Sometimes the local resolver answers garbage — filtered networks, captive
+  portals, or a resolver that simply drops queries. Rather than debugging the
+  network, I resolve over HTTPS and pin the result:</p>
+  <pre>$ curl -s "https://cloudflare-dns.com/dns-query?name=target.example.com&amp;type=A" \
+  -H "accept: application/dns-json" \
+  | jq -r '.Answer[].data'
+203.0.113.10</pre>
+  <p>One request, JSON back, no dependency on the system resolver. The returned IP
+  feeds straight into <code>curl --resolve</code>, and the rest of the toolchain
+  works exactly as usual. This two-step dance — DoH lookup, then pinned requests —
+  is the most reusable trick in this whole post.</p>
+
+  <h2>Patience: read every response</h2>
+  <p>The toolkit is small because the method is slow on purpose. One request, one
+  response, read fully. Compare the unauthenticated response with the authenticated
+  one. Compare the valid parameter with the mutated one. Identical responses to
+  different inputs usually mean a dead end; different responses mean a thread.
+  No scanner makes this comparison — your eyes do, and they need a second per
+  request.</p>
+  <p>This pace has a second benefit: on an authorized engagement it keeps the noise
+  near zero. Nobody's logs look like an attack, because nothing I send is one.</p>
+
+  <h2>Notes: the tool that isn't installed</h2>
+  <p>The final piece is not a command. Every endpoint, every observed behavior, every
+  dead end goes into dated notes the same day. My log entries look like this:</p>
+  <pre>2026-09-27 10:15 — GET /api/v1/hotQuestions?frontendId=100
+  200, 41 items, same body for 100/101/99 → likely a static config,
+  not an access-control signal. Moving on.</pre>
+  <p>Two weeks later, memory says "I think I saw something about a v2 endpoint."
+  A dated note says whether you did. That difference is worth more than any tool.</p>
+
+  <h2>Putting it together</h2>
+  <p>That is the whole kit: <code>curl</code> to speak HTTP precisely,
+  <code>jq</code> to carve JSON, <code>grep</code> to mine bundles, DoH plus
+  <code>--resolve</code> to survive broken networks, and dated notes to keep it all.
+  Master these and the expensive tooling becomes optional — the signal was never in
+  the tools anyway. It is in reading what the application already tells you.</p>
+
+  <div class="callout">
+    <strong>Disclosure note.</strong> Specific findings from live engagements are reported
+    privately to the vendor first and published here only after remediation or explicit
+    permission.
+  </div>
+
+  <a class="back-link" href="index.html">← all write-ups</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>
