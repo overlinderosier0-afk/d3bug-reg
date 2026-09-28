@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>When DNS lies: resolving over HTTPS — D3BUG.REG</title>
+<meta name="description" content="When the local resolver is filtered or broken, resolve hostnames over HTTPS with cloudflare-dns.com and pin the results with curl --resolve.">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> cat doh-dns-resolution.md &nbsp;·&nbsp; 2026-09-28 &nbsp;·&nbsp; technique</p>
+  <h1>When DNS lies: resolving over HTTPS</h1>
+
+  <p>One of the most confusing failures in recon is also one of the simplest:
+  the browser loads a page fine, but the terminal says
+  <code>curl: (6) Could not resolve host</code>. Nothing is down. The network works.
+  Your <em>resolver</em> is broken — or filtered. Fighting it is a waste of time;
+  routing around it takes one command.</p>
+
+  <div class="callout">
+    <strong>Scope first.</strong> Everything below assumes written authorization for the
+    target. Resolving a hostname you are authorized to test is normal recon;
+    doing it against systems you have no permission to touch is not.
+  </div>
+
+  <h2>How you notice the lie</h2>
+  <p>The symptom is asymmetric: the browser (often in DoH mode, bypassing the
+  system resolver entirely) reaches the host, while the terminal cannot.
+  Confirm it is a resolver problem before anything else:</p>
+  <pre>$ curl -sI https://target.example.com/ -o /dev/null -w "%{http_code}\n"
+curl: (6) Could not resolve host: target.example.com
+$ dig target.example.com +short
+;; connection timed out; no servers could be reached</pre>
+  <p>If <code>dig</code> times out while the browser works, your DNS path is the
+  problem. Common causes on hostile networks: captive portals, ISP resolvers
+  that filter, or outbound port 53 blocked entirely. The fix is not to argue with
+  the router — it is to stop using port 53.</p>
+
+  <h2>Resolve over HTTPS instead</h2>
+  <p>DNS-over-HTTPS carries the query over a plain HTTPS request to a resolver
+  you trust. Cloudflare's endpoint speaks the JSON API I reach for first:</p>
+  <pre>$ curl -s "https://cloudflare-dns.com/dns-query?name=target.example.com&amp;type=A" \
+  -H "accept: application/dns-json" | jq -r '.Answer[].data'
+93.184.216.34</pre>
+  <p>Two things to remember about this command:</p>
+  <ol>
+    <li>The <code>accept: application/dns-json</code> header is mandatory —
+    without it you get the binary DNS wire format, which curl will print as garbage.</li>
+    <li>Port 443 is doing the work here. If HTTPS works at all on your network,
+    this works, because it looks like any other web request.</li>
+  </ol>
+  <p>You can resolve other record types the same way — <code>type=AAAA</code>,
+  <code>type=CNAME</code>, <code>type=TXT</code> — by changing one parameter.
+  For a quick sanity check of several subdomains, wrap it in a shell loop:</p>
+  <pre>$ for h in a.target.example.com b.target.example.com; do
+  echo -n "$h -&gt; "
+  curl -s "https://cloudflare-dns.com/dns-query?name=$h&amp;type=A" \
+    -H "accept: application/dns-json" | jq -r '.Answer[]?.data // "no answer"'
+done
+a.target.example.com -&gt; 93.184.216.34
+b.target.example.com -&gt; no answer</pre>
+  <p>The <code>.Answer[]?</code> with the optional operator matters: a non-existent
+  name returns no <code>Answer</code> key at all, and without the <code>?</code>
+  <code>jq</code> exits non-zero mid-loop.</p>
+
+  <h2>Pin the result with curl --resolve</h2>
+  <p>Knowing the IP is only half the battle — every subsequent tool still consults
+  the broken resolver. <code>curl --resolve</code> overrides DNS for one request,
+  which is exactly what you want:</p>
+  <pre>$ curl -sI https://target.example.com/ --resolve target.example.com:443:93.184.216.34 \
+  -o /dev/null -w "%{http_code}\n"
+200</pre>
+  <p>This stays correct even on shared hosting and CDNs: <code>--resolve</code>
+  only replaces the address lookup, so TLS SNI and the <code>Host</code> header
+  still carry the original name. Verify the handshake with <code>-v</code> and
+  confirm the TLS certificate belongs to the hostname you asked for, not the IP.</p>
+  <p>One catch: the pinned IP lives only in that one curl process. If you are
+  chaining several probes, export the IP into a variable and reuse it:</p>
+  <pre>$ IP=$(curl -s "https://cloudflare-dns.com/dns-query?name=target.example.com&amp;type=A" \
+  -H "accept: application/dns-json" | jq -r '.Answer[].data')
+$ curl -sv https://target.example.com/api/prelogin \
+  --resolve target.example.com:443:$IP | head -5</pre>
+  <p>This pattern — resolve once over HTTPS, pin everywhere — unblocks the entire
+  rest of your toolchain without touching a single system setting.</p>
+
+  <h2>Why I don't just edit /etc/resolv.conf</h2>
+  <p>Changing the system resolver feels permanent and is rarely possible: you may
+  lack root on the box, the file may be managed by NetworkManager, and on hostile
+  networks the new nameserver can be filtered exactly like the old one. The DoH
+  route needs no privileges, no restart, and survives moving between networks —
+  which is the whole point of a recon laptop.</p>
+
+  <h2>What this gives you</h2>
+  <p>DNS is the first dependency in every recon pipeline, and it fails silently —
+  "could not resolve host" hides whether the target is dead or your network is
+  lying. Resolving over HTTPS turns that ambiguity into a fact: you get the
+  answer from a resolver you can see, then pin it so the rest of your commands
+  stop depending on a network you can't trust. When the resolver works again,
+  drop the pinning. Until then, this keeps the engagement moving.</p>
+
+  <div class="callout">
+    <strong>Disclosure note.</strong> Techniques described here are methodology only.
+    Specific findings from live engagements are reported privately to the vendor first
+    and published here only after remediation or explicit permission.
+  </div>
+
+  <a class="back-link" href="index.html">← all write-ups</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>
