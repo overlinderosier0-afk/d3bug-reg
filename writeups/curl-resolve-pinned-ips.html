@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pinning IPs with curl --resolve — D3BUG.REG</title>
+<meta name="description" content="How curl --resolve pins a hostname to an IP for one command, bypassing broken or filtered DNS for the whole toolchain — and how to verify it with -v.">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> cat curl-resolve-pinned-ips.md &nbsp;·&nbsp; 2026-09-29 &nbsp;·&nbsp; technique</p>
+  <h1>Pinning IPs with curl --resolve</h1>
+
+  <p>Sometimes DNS is the thing standing between you and your target, and not for
+  any interesting reason. A filtered resolver that refuses to answer, a captive
+  portal hijacking every query, a local network where port 53 is simply dead.
+  You already know the IP — you resolved it over HTTPS, or it sits in your
+  engagement notes — but the rest of your toolchain keeps asking the broken
+  resolver and failing. That is exactly what <code>curl --resolve</code> is for.</p>
+
+  <div class="callout">
+    <strong>Scope first.</strong> Everything here assumes written authorization for the
+    target. No scope, no recon.
+  </div>
+
+  <h2>The problem, in one command</h2>
+  <p>Your system resolver is broken, so this fails:</p>
+  <pre>$ curl -s https://target.example.com/ | head -5
+curl: (6) Could not resolve host: target.example.com</pre>
+  <p>The TLS config is fine, the network is fine, the server is fine. Only the
+  name lookup is dead. Editing <code>/etc/hosts</code> "fixes" it, but it is a
+  system-wide change you have to remember to undo, and it requires privileges.
+  There is a cleaner option that stays inside your shell session.</p>
+
+  <h2>--resolve: one-off DNS, pinned to a command</h2>
+  <p><code>curl --resolve host:port:ip</code> tells curl: for this request, map
+  this hostname to this IP and do not ask any resolver. The syntax is exact —
+  hostname, port, IP, colon-separated:</p>
+  <pre>$ curl --resolve target.example.com:443:93.184.216.34 \
+  https://target.example.com/</pre>
+  <p>The port matters: the pin applies to connections on that port only. The
+  hostname in the URL stays untouched, so the <code>Host</code> header and —
+  critically — the TLS SNI still carry the real hostname. The server never knows
+  you bypassed DNS, and certificate validation works exactly as it should.</p>
+
+  <h2>Where does the IP come from?</h2>
+  <p>From a resolution path you trust, kept separate from the broken one. My
+  usual answer is DNS over HTTPS, as covered in my
+  <a href="doh-dns-resolution.html">earlier post on DoH</a>:</p>
+  <pre>$ curl -s "https://cloudflare-dns.com/dns-query?name=target.example.com&amp;type=A" \
+  -H "accept: application/dns-json" | jq -r '.Answer[].data'
+93.184.216.34</pre>
+  <p>The pattern is two steps: resolve once over HTTPS, then pin the result for
+  every subsequent request. I put both in the engagement notes, because the IP
+  is an observation like any other — worth recording, worth re-verifying later.</p>
+
+  <h2>Verify the pin with -v</h2>
+  <p>Never trust that the pin did what you think it did. <code>-v</code> shows
+  you the connection plan before the request goes out:</p>
+  <pre>$ curl -v --resolve target.example.com:443:93.184.216.34 \
+  https://target.example.com/ -o /dev/null -s
+
+* Added target.example.com:443:93.184.216.34 to DNS cache
+* Hostname was NOT found in DNS cache
+*   Trying 93.184.216.34:443...
+* Connected to target.example.com (93.184.216.34) port 443
+* SSL connection using TLSv1.3 / TLS_AES_256_GCM_SHA384
+* ALPN: server accepted h2</pre>
+  <p>Two lines tell you the whole story. <code>Added ... to DNS cache</code>
+  confirms your pin landed. <code>Trying 93.184.216.34:443</code> confirms curl
+  is connecting there — while the log line right after still shows the hostname,
+  which means SNI and certificate validation are operating on the real name.
+  If you see <code>Connected to</code> with a different IP than your pin,
+  something else (a proxy, a redirect) is in the path and you want to know that
+  before you draw conclusions from the responses.</p>
+
+  <h2>One pattern, the whole toolchain</h2>
+  <p>The real payoff is consistency: every command in your pipeline uses the
+  same pinned resolution, so results are comparable across tools. A shell
+  variable keeps it tidy:</p>
+  <pre>$ IP=93.184.216.34
+$ curl -s --resolve "target.example.com:443:$IP" https://target.example.com/ \
+  | grep -oE 'src="[^"]+\.js[^"]*"' | sed 's/src="//;s/"//' &gt; bundles.txt
+$ curl -s --resolve "target.example.com:443:$IP" https://target.example.com/api/prelogin \
+  -H "Content-Type: application/json" -d '{}'</pre>
+  <p>Different endpoints, different purposes, one pinned identity for the
+  target. That matters for the comparison work: when I diff an unauthenticated
+  response against an authenticated one, I need to know the only variable was
+  the request itself — not a resolver flip-flopping between IPs mid-session.</p>
+
+  <h2>What --resolve does not do</h2>
+  <p>Honest limits, because they bite:</p>
+  <ol>
+    <li>It does not affect anything except curl. Your browser, other tools,
+    and other processes still use the broken resolver. This is per-invocation,
+    by design.</li>
+    <li>It pins <em>your</em> chosen IP. If the IP you pinned is stale or wrong,
+    every request confidently fails. Re-verify the address if responses
+    suddenly change.</li>
+    <li>It hides DNS-level behavior. If the target uses DNS-based load
+    balancing or geo-routing, pinning one IP means you are only ever testing
+    one edge. Note that in your notes — it is part of your scope picture.</li>
+    <li>It lives and dies with the process. Nothing is written to disk, which
+    is the point, but it also means each new shell session needs the pin
+    again. Fine — that is what the engagement notes are for.</li>
+  </ol>
+
+  <h2>The takeaway</h2>
+  <p>Broken DNS is an infrastructure annoyance, not a finding, and it should
+  never slow down an engagement. Resolve once over a trusted path, pin the
+  result with <code>--resolve</code>, verify with <code>-v</code>, and keep the
+  IP in your dated notes. Your requests stay comparable, your toolchain stays
+  honest, and the resolver can stay broken all week for all you care.</p>
+
+  <div class="callout">
+    <strong>Disclosure note.</strong> Specific findings from live engagements are reported
+    privately to the vendor first and published here only after remediation or explicit
+    permission.
+  </div>
+
+  <a class="back-link" href="index.html">← all write-ups</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>
