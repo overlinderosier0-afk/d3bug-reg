@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Reading minified JavaScript like prose — D3BUG.REG</title>
+<meta name="description" content="Minified bundles are readable if you work them in the right order: pretty-print, hunt string literals first, follow event listeners, and read framework chunks by filename.">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> cat reading-minified-js.md &nbsp;·&nbsp; 2026-09-30 &nbsp;·&nbsp; technique</p>
+  <h1>Reading minified JavaScript like prose</h1>
+
+  <p>A minified bundle looks hostile: one line, thousands of columns, variable names
+  like <code>e</code>, <code>t</code>, <code>n</code>. But minification only removes
+  whitespace and renames locals. The logic, the strings, and the API surface are all
+  still there. You just need to read the file in the right order: format first,
+  strings second, code paths third.</p>
+
+  <div class="callout">
+    <strong>Scope first.</strong> Everything below assumes written authorization for the
+    target. No scope, no recon — that rule is non-negotiable in my workflow.
+  </div>
+
+  <h2>1. Pretty-print before you read anything</h2>
+  <p>Never read a bundle raw. Open it in the browser DevTools Sources panel and hit the
+  pretty-print button (<code>{}</code>) — it re-indents the whole file instantly.
+  If you are working from a local copy, most editors will do the same on paste.
+  The variable names stay ugly, but structure is what you need first: you go from
+  one unreadable line to functions, blocks, and nesting you can actually scan.</p>
+  <p>Save the downloaded bundles in the engagement folder next to your notes. I keep
+  the collection step exactly as in my recon flow, so the files are already on disk:</p>
+  <pre>curl -s https://target.example.com/ \
+  | grep -oE 'src="[^"]+\.js[^"]*"' \
+  | sed 's/src="//;s/"//' | sort -u</pre>
+
+  <h2>2. Read the strings, not the code</h2>
+  <p>String literals survive minification untouched. Endpoint paths, query parameter
+  names, error messages, header names — all of it is still plaintext. So the first
+  pass is never "read the code". It is: dump every interesting string and build the
+  vocabulary of the application.</p>
+  <pre>grep -rhoE '"/api/[^"]+"' main.js | sort -u
+grep -rhoE '"/[a-z0-9/_-]+\.php[^"]*"' main.js | sort -u
+grep -roiE '"(redirect_uri|client_id|grant_type|prelogin|challenge)[^"]{0,40}' main.js | sort -u</pre>
+  <p>Error strings are especially valuable. A message like <code>"invalid session tag"</code>
+  or <code>"prelogin required"</code> tells you what the server checks and in what
+  order — you get the auth state machine for free, before reading a single line of
+  actual logic.</p>
+
+  <h2>3. Identify the framework chunks by filename</h2>
+  <p>Modern builds split into chunks, and the filenames tell you which chunk does what.
+  This is where most people waste time: they grep the 2&nbsp;MB vendor chunk instead
+  of the 40&nbsp;KB app chunk. Typical patterns:</p>
+  <pre># webpack / Vue CLI
+js/chunk-vendors.[hash].js      # third-party libraries — skip first
+js/app.[hash].js                # application code — read this
+# Create React App
+static/js/main.[hash].chunk.js  # application code
+static/js/2.[hash].chunk.js     # vendor chunk
+# Vite
+assets/index-[hash].js          # usually the whole app bundle</pre>
+  <p>Rule of thumb: the biggest file is almost never the interesting one. Start with
+  the app chunk, and only open the vendor chunk when a call disappears into library
+  code you need to understand.</p>
+
+  <h2>4. Follow the event listeners, not the functions</h2>
+  <p>Minified code has thousands of anonymous functions; the event listeners are the
+  table of contents. In DevTools, the Elements panel shows every listener attached
+  to a node, and clicking one jumps straight to the handler in the Sources panel.
+  On a login page, that means: find the submit button, open its <code>click</code>
+  listener, and you are standing at the start of the auth flow.</p>
+  <p>From there, trace backward and forward the same way every time:</p>
+  <ol>
+    <li>What values does the handler read from the form? (<code>password</code>, <code>username</code>, hidden fields.)</li>
+    <li>What transforms are applied — hashing, encoding, concatenation — before the request?</li>
+    <li>Which endpoint gets called, with which parameters, in which order?</li>
+    <li>Where does each response value go: storage, memory, redirect URL?</li>
+  </ol>
+  <p>Crypto primitives are easy to spot even minified: <code>CryptoJS</code>,
+  <code>AES</code>, <code>SHA256</code>, <code>MD5</code>, <code>createHash</code>.
+  Map the <em>sequence</em> — input, transforms, output — because the sequence is
+  what matters, not any single mangled function name.</p>
+
+  <h2>5. Search before you scroll</h2>
+  <p>Scrolling a 10,000-line pretty-printed file is how you lose an afternoon. Search
+  instead. Start from a string you found in step 2, find where it is used, then read
+  only that function. A few searches that almost always land:</p>
+  <pre># where is this endpoint actually called?
+grep -n "api/auth/prelogin" main.js
+# where does the token end up?
+grep -n -iE "localStorage|sessionStorage|setItem|document.cookie" main.js
+# what redirects happen?
+grep -n -iE "location\.href|window\.open|redirect" main.js | head -30</pre>
+  <p>Each hit is a waypoint. Read the 20 lines around it, note what you learned, and
+  follow the next thread. You are never "reading the bundle" — you are walking a
+  graph, one edge at a time.</p>
+
+  <h2>6. Keep the map as you go</h2>
+  <p>Minified code punishes re-reading: the function you understood at 2&nbsp;PM is
+  incomprehensible again at 4&nbsp;PM. So write it down immediately — endpoint,
+  purpose, inputs, outputs, one line each, dated. This is the same engagement
+  notebook discipline I use everywhere else: memory is worthless, a dated note is
+  evidence. Two weeks later, "the prelogin thing returns a salt" beats re-tracing
+  the whole call chain.</p>
+
+  <h2>What this gives you</h2>
+  <p>After this process, the bundle stops being a wall of noise and becomes a
+  specification: every endpoint the client knows, every auth step in order, every
+  storage location for tokens. Most of the interesting threads I have ever pulled
+  started as a single odd string literal that only looked odd because I had mapped
+  everything around it first.</p>
+
+  <div class="callout">
+    <strong>Disclosure note.</strong> Techniques described here are methodology only.
+    Specific findings from live engagements are reported privately to the vendor first
+    and published here only after remediation or explicit permission.
+  </div>
+
+  <a class="back-link" href="index.html">← all write-ups</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>
