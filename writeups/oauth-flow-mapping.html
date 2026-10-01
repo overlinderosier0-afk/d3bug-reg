@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mapping OAuth flows from the browser — D3BUG.REG</title>
+<meta name="description" content="Document the authorize → redirect → code exchange → token grant sequence from the DevTools network tab before probing anything.">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> cat oauth-flow-mapping.md &nbsp;·&nbsp; 2026-10-01 &nbsp;·&nbsp; methodology</p>
+  <h1>Mapping OAuth flows from the browser</h1>
+
+  <p>OAuth looks complicated in diagrams and simple in the browser. That gap is where
+  misunderstandings hide. Before I ever touch an auth flow with curl, I map it: every
+  endpoint, every redirect, every parameter, in order, exactly as the browser sees them.
+  This post is that mapping process — nothing but the DevTools network tab, a terminal,
+  and a notes file.</p>
+
+  <div class="callout">
+    <strong>Scope first.</strong> Everything below assumes written authorization for the
+    target. No scope, no recon — that rule is non-negotiable in my workflow.
+  </div>
+
+  <h2>1. Start from the entry point</h2>
+  <p>Most flows begin with one click — "Sign in with X". Open DevTools, switch to the
+  Network tab, enable <code>Preserve log</code>, and click the button. Then write down,
+  immediately: the full URL of the authorize endpoint, the <code>client_id</code>, the
+  <code>redirect_uri</code>, the <code>response_type</code>, the <code>scope</code>, and
+  the <code>state</code>. These are public, observable values — the browser sends them in
+  cleartext on every single login.</p>
+
+  <h2>2. Find the flow in the bundles first</h2>
+  <p>I usually spot the flow before clicking anything. With the JavaScript bundles already
+  downloaded locally, I grep for the flow's vocabulary:</p>
+  <pre>grep -rhoE '"https?://[^"]*authorize[^"]*"' *.js | sort -u
+grep -roiE '(redirect_uri|client_id|response_type|code_verifier|grant_type)[^"]{0,40}' *.js | sort -u</pre>
+  <p>If the bundle defines the endpoints, the network tab later confirms them. Two
+  independent sources describing one flow — and any mismatch between them is the most
+  interesting thing I can find at this stage.</p>
+
+  <h2>3. Walk the redirect chain, one hop at a time</h2>
+  <p>The browser follows redirects automatically, which hides the interesting part: each
+  hop carries parameters. To see them individually, replay the authorize request with
+  curl and stop at the first redirect:</p>
+  <pre>curl -s -D - -o /dev/null --max-redirs 0 \
+  "https://auth.example.com/authorize?client_id=abc&amp;redirect_uri=https%3A%2F%2Fapp.example.com%2Fcb&amp;response_type=code&amp;scope=openid+profile&amp;state=xyz"</pre>
+  <p>The <code>Location</code> header is the next hop. Read it. Note its parameters.
+  Follow it manually the same way. A typical flow is three to six hops; at this pace,
+  each one takes seconds to inspect and costs the server nothing a real user wouldn't.</p>
+
+  <h2>4. Note the code exchange, don't replay it</h2>
+  <p>Eventually a hop delivers a <code>code</code> to the <code>redirect_uri</code> —
+  something like <code>app.example.com/cb?code=...&amp;state=...</code>. The application
+  then exchanges that code server-side for tokens
+  (<code>grant_type=authorization_code</code>). I find the token endpoint in the bundles
+  with a <code>grant_type</code> grep and note it in the map. I do not replay the exchange
+  myself against a live server: mapping means knowing this step exists and where it
+  happens, not interacting with it.</p>
+
+  <h2>5. Inventory where the tokens land</h2>
+  <p>After the exchange, the app holds tokens. My job is to inventory where they live,
+  because the storage location determines everything about their exposure. Back to
+  DevTools, Application tab: check <code>localStorage</code>, <code>sessionStorage</code>,
+  cookies. For in-memory tokens, watch the network tab for <code>Authorization</code>
+  headers on subsequent requests. Document what I find factually — "access token in
+  localStorage under key X" is a design fact, not an attack.</p>
+
+  <h2>6. Observe, don't interact</h2>
+  <p>Everything above is observation. I click the same buttons a normal user clicks, I read
+  what the browser already received, I replay GET requests the browser already made. No
+  fuzzing the token endpoint, no replaying codes, no mutating parameters against a live
+  server. If a hop returns something unexpected, it goes into the notes as a timestamped
+  observation — not as a finding. Deciding what it means is a later step, on authorized
+  scope, with a written plan.</p>
+
+  <h2>7. The map itself</h2>
+  <p>By the end I hold a dated document: the endpoint inventory in order, every parameter
+  seen on each hop, the token storage locations, and the explicit list of things I chose
+  not to touch. That map is what makes any later authorized testing precise instead of
+  random — and it is exactly the kind of document a disclosure report needs when one of
+  those steps turns out to matter.</p>
+
+  <div class="callout">
+    <strong>Disclosure note.</strong> Techniques described here are methodology only.
+    Specific findings from live engagements are reported privately to the vendor first
+    and published here only after remediation or explicit permission.
+  </div>
+
+  <a class="back-link" href="index.html">← all write-ups</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>
