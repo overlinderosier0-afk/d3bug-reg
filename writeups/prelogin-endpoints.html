@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>What prelogin endpoints reveal — D3BUG.REG</title>
+<meta name="description" content="Many auth systems expose a prelogin step that returns salts or flags before the real login — here's how to read what it tells you about the auth design.">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> cat prelogin-endpoints.md &nbsp;·&nbsp; 2026-10-02 &nbsp;·&nbsp; technique</p>
+  <h1>What prelogin endpoints reveal</h1>
+
+  <p>Some auth systems ask a question before they let you log in. Not credentials yet —
+  just a setup step: the client calls a small endpoint, gets back a salt, an iteration
+  count, or a couple of flags, and only then builds the real login request.
+  That step is the prelogin endpoint, and reading it carefully tells you more about
+  the auth design than an hour of blind probing.</p>
+
+  <div class="callout">
+    <strong>Scope first.</strong> Everything below assumes written authorization for the
+    target. No scope, no recon — that rule is non-negotiable in my workflow.
+  </div>
+
+  <h2>1. Spotting the prelogin step</h2>
+  <p>You will rarely find it documented. I find it the same way I find everything
+  else on the client side: in the bundles, by reading the login flow from the submit
+  handler backward. The tell is a network call that happens <em>before</em> the
+  credentials go out — usually a <code>POST</code> with a JSON body containing the
+  username or email, returning JSON that the login code then consumes:</p>
+  <pre>$ grep -rhoE '"[^"]*(prelogin|pre-login|preauth|challenge|nonce)[^"]*"' *.js | sort -u
+"/api/auth/prelogin"
+"/api/v2/auth/pre-login"</pre>
+  <p>Watch the order of calls around it. If the sequence is
+  <em>prelogin → transform → login</em>, the prelogin response feeds the transform —
+  and the transform is the next thing to understand.</p>
+
+  <h2>2. Ask for the same thing the client asks</h2>
+  <p>Probe at a human pace, one request at a time, starting with the exact request the
+  client makes. If the client sends the username to prelogin, send a username. Read
+  the full response — headers, status, and body — before varying anything:</p>
+  <pre>$ curl -s -X POST https://target.example.com/api/auth/prelogin \
+    -H 'Content-Type: application/json' \
+    -d '{"username":"alice@example.com"}' | jq .
+{
+  "salt": "9f2c1ab4d7e83f06",
+  "iterations": 10000,
+  "algorithm": "sha256",
+  "accountExists": true,
+  "requiresMfa": false
+}</pre>
+  <p>Then change exactly one thing per probe: an empty body, a missing field, a
+  different username, <code>GET</code> instead of <code>POST</code>. Each response
+  goes into the dated notes with the input that produced it.</p>
+
+  <h2>3. Reading the fields</h2>
+  <p>The fields a prelogin endpoint returns are the server telling you its design
+  decisions. Common ones and what they imply:</p>
+  <ul>
+    <li><strong>salt / iterations / algorithm</strong> — the server chose client-side
+    key derivation. The salt length and encoding (hex? base64?) and the iteration
+    count are design facts worth noting, not secrets to judge.</li>
+    <li><strong>flags</strong> like <code>accountExists</code>,
+    <code>passwordExpired</code>, <code>requiresMfa</code>,
+    <code>captchaRequired</code>, <code>locked</code> — the server computes account
+    state before authentication and hands some of it to the client. Note which flags
+    exist at all: each one is a state the system distinguishes.</li>
+    <li><strong>distinct error codes</strong> — timeout vs. missing cookie vs. invalid
+    payload, each with its own code. Those codes reveal system layers: where the
+    check happens and in what order.</li>
+  </ul>
+  <p>Record the exact shapes: field names, types, value ranges. "The salt is 16 hex
+  chars" is a dated fact; "the crypto looks weak" is an opinion you have not earned
+  yet.</p>
+
+  <h2>4. The signal is in the difference</h2>
+  <p>One response is data; two responses are information. The comparison that matters
+  most is nonexistent user vs. existing user, then malformed input vs. well-formed:</p>
+  <pre>$ curl -s -X POST https://target.example.com/api/auth/prelogin \
+    -H 'Content-Type: application/json' \
+    -d '{"username":"nobody-at-all@example.com"}' | jq .
+{
+  "salt": "0000000000000000",
+  "iterations": 10000,
+  "algorithm": "sha256",
+  "accountExists": false,
+  "requiresMfa": false
+}</pre>
+  <p>Same shape, different content — that is the server being careful. A server that
+  returns a different status code, a different body shape, or a different error
+  string per case is handing you an oracle. My notes keep a small table for this:
+  input → status → body shape → rough latency. Latency is a last resort and a noisy
+  one; shape differences are the honest signal.</p>
+
+  <h2>5. What not to do with it</h2>
+  <p>This is methodology, so the boundary is part of the technique. Probing a prelogin
+  endpoint with your own handful of test accounts is research. Turning it into a
+  username-enumeration campaign with a wordlist of real emails is not — that is
+  usually outside the engagement scope and outside this article's scope too. If the
+  error codes distinguish users, note it factually, report it through the proper
+  channel, and do not build anything on top of it.</p>
+  <p>Similarly: do not fuzz the endpoint into weird states, and do not treat a flag
+  like <code>accountExists: false</code> as permission to keep digging at that
+  account. The point of reading prelogin is to understand the design faster, not to
+  find a shortcut around it.</p>
+
+  <h2>6. Write it down the same day</h2>
+  <p>A prelogin reading is only useful if it survives the week. My note for each one
+  holds: the endpoint and method, the exact requests sent, the full responses
+  received, what the fields imply about the design, and what I deliberately did
+  <em>not</em> test. Two weeks later, that note is the map — "I remember the salt
+  was short" is not.</p>
+
+  <div class="callout">
+    <strong>Disclosure note.</strong> Techniques described here are methodology only.
+    Specific findings from live engagements are reported privately to the vendor first
+    and published here only after remediation or explicit permission.
+  </div>
+
+  <a class="back-link" href="index.html">← all write-ups</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>
