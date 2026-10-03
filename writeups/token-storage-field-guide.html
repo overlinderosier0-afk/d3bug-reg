@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Where tokens live: a field guide — D3BUG.REG</title>
+<meta name="description" content="localStorage, sessionStorage, cookies, memory, URL — a systematic way to inventory where an app keeps its tokens, and why each location changes how you test.">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> cat token-storage.md &nbsp;·&nbsp; 2026-10-03 &nbsp;·&nbsp; technique</p>
+  <h1>Where tokens live: a field guide</h1>
+
+  <p>Every authenticated session has to park its credentials somewhere on the
+  client. Where a token lives — <code>localStorage</code>, a cookie, page memory,
+  the URL — changes what you can observe, how you reproduce a session in
+  <code>curl</code>, and which questions are even worth asking. This is my
+  inventory routine: the same five places, checked in the same order, on my own
+  accounts, during authorized engagements.</p>
+
+  <div class="callout">
+    <strong>Scope first.</strong> Everything below assumes written authorization
+    for the target and is done with your own test accounts. No scope, no
+    probing — that rule is non-negotiable in my workflow.
+  </div>
+
+  <h2>1. localStorage — the honest key-value drawer</h2>
+  <p>Open DevTools, go to <strong>Application → Local Storage</strong>, and look.
+  Tokens here persist across tabs and restarts, and the keys are usually
+  self-descriptive: <code>access_token</code>, <code>id_token</code>,
+  <code>authToken</code>, <code>user</code> containing a JSON blob. From the
+  console I list keys before assuming anything:</p>
+  <pre>// in DevTools console, on your own session
+for (let i = 0; i < localStorage.length; i++) {
+  console.log(localStorage.key(i));
+}</pre>
+  <p>What I record: the key names, whether the values are JWTs or opaque strings,
+  and what happens to them on logout (cleared? left behind?). A token that
+  survives logout is a note worth keeping — on my own session, it tells me how
+  the app treats session lifecycle.</p>
+
+  <h2>2. sessionStorage — same drawer, tab lifetime</h2>
+  <p><strong>Application → Session Storage</strong>. Same inspection method, but
+  the lifetime rule is different: everything vanishes when the tab closes. Apps
+  that use it tend to be more careful, and it changes my reproduction workflow —
+  I can't rely on a token captured yesterday still being valid. The check is
+  identical in the console:</p>
+  <pre>for (let i = 0; i < sessionStorage.length; i++) {
+  console.log(sessionStorage.key(i));
+}</pre>
+
+  <h2>3. Cookies — read the flags, not just the names</h2>
+  <p>Cookies live in <strong>Application → Cookies</strong> and in the
+  <code>Set-Cookie</code> headers of the login response. The names matter less
+  than the flags. My checklist for each session cookie:</p>
+  <pre>$ curl -s -D headers.txt -o /dev/null -X POST \
+    https://app.example.com/api/login \
+    -H "Content-Type: application/json" \
+    -d '{"user":"my-test-account","pass":"..."}'
+$ grep -i "^set-cookie" headers.txt</pre>
+  <p>I look at <code>HttpOnly</code> (readable from JS or not),
+  <code>Secure</code>, <code>SameSite</code>, and the <code>Path</code>. A
+  cookie without <code>HttpOnly</code> is readable via
+  <code>document.cookie</code> — that's an app design choice I note, not a
+  finding I announce. For reproduction in curl, cookies mean using a cookie jar
+  instead of copying an Authorization header:</p>
+  <pre>$ curl -s -b cookies.txt https://app.example.com/api/profile | jq .</pre>
+
+  <h2>4. Memory — the token that only exists at runtime</h2>
+  <p>Some apps keep tokens only in JavaScript variables: nothing in storage,
+  nothing in cookies, reload the page and you log in again. You confirm this by
+  elimination — storage is empty, cookies carry nothing, yet requests carry an
+  <code>Authorization: Bearer …</code> header in the Network tab. I trace where
+  the header gets attached, usually an interceptor or a fetch wrapper found by
+  searching the bundle for <code>Authorization</code>:</p>
+  <pre>grep -rhoE "Authorization[^,;]{0,60}" *.js | sort -u</pre>
+  <p>Memory-stored tokens are the hardest to reuse in curl: you copy the bearer
+  value from a captured request, use it, and watch how long it stays valid.
+  Expiry and rotation behavior — does it silently refresh? — is exactly what I
+  document here.</p>
+
+  <h2>5. The URL — the place tokens should never be</h2>
+  <p>Check the address bar and the redirect chain after login. Tokens in query
+  parameters or fragments end up in browser history, proxy logs, and
+  <code>Referer</code> headers — all places outside the app's control. I watch
+  the Network tab during the login redirect sequence and flag any token-shaped
+  value in a URL as a design concern to document:</p>
+  <pre>$ curl -s -D - -o /dev/null \
+    "https://app.example.com/api/oauth/authorize?client_id=…" \
+    | grep -iE "location|token"</pre>
+  <p>The <code>Location</code> header of each redirect is the thing to read.
+  If a session value rides along in it, that goes in the notes — factual,
+  no drama.</p>
+
+  <h2>The inventory, as a routine</h2>
+  <p>On a new engagement the sequence is always the same, on my own account:</p>
+  <ol>
+    <li>Log in, then list <code>localStorage</code> and <code>sessionStorage</code> keys.</li>
+    <li>Inspect <code>Set-Cookie</code> headers and cookie flags.</li>
+    <li>Check whether requests carry a bearer header — and where it comes from.</li>
+    <li>Watch the URL bar and redirect <code>Location</code> headers through the whole login flow.</li>
+    <li>Log out and re-check every location: what survived, what rotated, what vanished.</li>
+  </ol>
+  <p>Five minutes of routine, and I know exactly how to carry the session into
+  curl for the manual probing that follows — jar file or copied header, fresh
+  token or long-lived one. That knowledge is unglamorous and it saves hours.</p>
+
+  <div class="callout">
+    <strong>Disclosure note.</strong> Techniques described here are methodology
+    only. Specific findings from live engagements are reported privately to the
+    vendor first and published here only after remediation or explicit permission.
+  </div>
+
+  <a class="back-link" href="index.html">← all write-ups</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>
