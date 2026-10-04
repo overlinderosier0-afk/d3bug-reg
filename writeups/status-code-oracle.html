@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Status codes as an oracle — D3BUG.REG</title>
+<meta name="description" content="Compare responses across unauthenticated, authenticated, and mutated requests: identical answers mean a dead end, different answers mean a thread to pull.">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> cat status-code-oracle.md &nbsp;·&nbsp; 2026-10-04 &nbsp;·&nbsp; technique</p>
+  <h1>Status codes as an oracle</h1>
+
+  <p>Servers answer every question you ask them — the trick is asking the <em>right
+  pairs</em> of questions and reading what changes between the answers.
+  A status code comparison is the cheapest oracle in my workflow:
+  same endpoint, different conditions, and I watch which responses diverge.
+  Divergences are threads. Identical answers are dead ends.</p>
+
+  <div class="callout">
+    <strong>Scope first.</strong> Everything below assumes written authorization for the
+    target. No scope, no recon — that rule is non-negotiable in my workflow.
+  </div>
+
+  <h2>1. The three-request comparison</h2>
+  <p>The base pattern never changes. For any candidate endpoint I fire three
+  manual requests, one at a time, and keep all three full responses:</p>
+  <pre>$ curl -si https://target.example.com/api/profile &gt; req-unauth.txt
+$ curl -si https://target.example.com/api/profile \
+    -H "Cookie: session=OWNSESSION" &gt; req-auth.txt
+$ curl -si "https://target.example.com/api/profile?id=0000" \
+    -H "Cookie: session=OWNSESSION" &gt; req-mutated.txt</pre>
+  <p>The <code>-i</code> flag matters: status line and headers are part of the
+  signal, not just the body. I only ever test with my own session and my own
+  data — the oracle works the same whether the parameters point at real records
+  or at values I control.</p>
+
+  <h2>2. Read the matrix, don't chase one code</h2>
+  <p>A single status code tells you almost nothing. The <em>matrix</em> tells you
+  everything. I lay the three answers side by side:</p>
+  <pre>$ for f in req-unauth.txt req-auth.txt req-mutated.txt; do
+    echo -n "$f : "
+    head -1 "$f"
+  done
+req-unauth.txt : HTTP/2 401
+req-auth.txt   : HTTP/2 200
+req-mutated.txt: HTTP/2 403</pre>
+  <p>This shape — <code>401 → 200 → 403</code> — is informative: the endpoint
+  checks authentication first, then applies an ownership rule that rejects my
+  mutated parameter. Each layer revealed itself because I changed exactly one
+  variable at a time. Now contrast it with the boring shape:</p>
+  <pre>req-unauth.txt : HTTP/2 404
+req-auth.txt   : HTTP/2 404
+req-mutated.txt: HTTP/2 404</pre>
+  <p>Three identical answers, including the body, means this input is a dead end
+  — the server treats every variant the same way. I log it as "no divergence"
+  in my dated notes and move on instead of sinking an afternoon into it.</p>
+
+  <h2>3. The oracle lives beyond the number</h2>
+  <p>Status codes are the headline, but the body and headers carry the rest.
+  Two requests can both return <code>200</code> and still diverge — one returns
+  a full object, the other an empty one. I diff the saved responses:</p>
+  <pre>$ diff req-auth.txt req-mutated.txt
+&lt; {"id":"self","email":"me@example.com","role":"member"}
+&gt; {"error":"not_found"}</pre>
+  <p>I also watch <code>Content-Length</code>, <code>Set-Cookie</code>, and any
+  custom headers like <code>X-Request-Id</code> — a response that is 200 bytes
+  longer than its twin is a divergence, even when both say 200. Timing counts
+  too, but I treat timing as a weak signal: network jitter makes it noisy, so
+  I only trust it when a pattern repeats across many manual probes.</p>
+
+  <h2>4. When the oracle goes quiet</h2>
+  <p>Sometimes the application normalizes everything: every bad input returns the
+  same generic error page with the same code, because a global handler catches
+  it first. That is not a failure — it is information about the defense layers.
+  When all responses converge, the oracle is telling me the endpoint is uniformly
+  gated, and I stop pulling that thread. Other days a WAF in front of the app
+  answers before the app does, and the codes I see are the WAF's, not the
+  backend's. I note which layer is talking before I draw conclusions.</p>
+
+  <h2>What this gives you</h2>
+  <p>The discipline is what makes this work at a human pace: one request, read the
+  response, change one variable, read again. No scanner needed, no rate limits
+  burned, no collateral noise. Most of my interesting threads started as a single
+  line in a comparison table that didn't match its neighbors — a <code>403</code>
+  where I expected a <code>404</code>, a body that shrank instead of growing.
+  The oracle never hands you a finding. It just tells you, reliably, where to
+  look next.</p>
+
+  <div class="callout">
+    <strong>Disclosure note.</strong> Techniques described here are methodology only.
+    Specific findings from live engagements are reported privately to the vendor first
+    and published here only after remediation or explicit permission.
+  </div>
+
+  <a class="back-link" href="index.html">← all write-ups</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>
