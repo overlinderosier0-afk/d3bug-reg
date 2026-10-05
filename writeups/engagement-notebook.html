@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The engagement notebook — D3BUG.REG</title>
+<meta name="description" content="Dated notes, an endpoint inventory, and a dead-end log: why memory is worthless and a dated note is evidence.">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> cat engagement-notebook.md &nbsp;·&nbsp; 2026-10-05 &nbsp;·&nbsp; methodology</p>
+  <h1>The engagement notebook</h1>
+
+  <p>Memory is worthless. That is not a metaphor — it is a measured fact about how
+  recon goes wrong. Two weeks into an engagement you will "remember" seeing a v2
+  endpoint somewhere, in some bundle, maybe behind a flag you half recall. That
+  memory is unsearchable, undated, and unverifiable. A dated note is evidence.
+  Here is how I keep mine.</p>
+
+  <div class="callout">
+    <strong>Scope first.</strong> Everything below assumes written authorization for the
+    target. No scope, no recon — and no notes to take, because there is nothing to
+    test.
+  </div>
+
+  <h2>1. One folder per engagement, same skeleton</h2>
+  <p>Every engagement starts with the same directory layout, created before the
+  first request. Consistency means I can navigate an old engagement years later
+  without thinking:</p>
+  <pre>$ mkdir -p engagement-name/{notes,evidence,bundles}
+$ touch engagement-name/notes/log.md \
+        engagement-name/notes/endpoints.md \
+        engagement-name/notes/dead-ends.md
+$ ls engagement-name/notes
+dead-ends.md  endpoints.md  log.md</pre>
+  <p><code>log.md</code> is the daily journal. <code>endpoints.md</code> is the
+  running inventory. <code>dead-ends.md</code> is the graveyard — and the graveyard
+  matters more than it sounds.</p>
+
+  <h2>2. The daily log: date, command, observation</h2>
+  <p>Every entry in <code>log.md</code> starts with a date header and follows one
+  discipline: <strong>write the observation the same day, or it did not
+  happen.</strong> A typical entry looks like this:</p>
+  <pre>## 2026-10-05
+
+- crt.sh enum: 34 unique subdomains, 12 resolve (notes: subdomains.txt).
+- /api/auth/prelogin returns salt + keyVersion before login form
+  even renders. No auth required. Response:
+  {"salt":"...","keyVersion":3}
+- login POST transforms password client-side — check bundles for
+  the submit handler next session.
+- NOTE: host on 198.18.0.0/24 lab range responding slowly (~4s).
+  Flag for later, don't hammer.</pre>
+  <p>Notice what is <em>not</em> here: conclusions, hypotheses, excitement. The log
+  records what I did and what came back. Interpretation is a separate pass,
+  written later with the entries in front of me. Separating observation from
+  interpretation is what makes the log trustworthy.</p>
+
+  <h2>3. The endpoint inventory</h2>
+  <p><code>endpoints.md</code> is a living table — every endpoint the client
+  exposes, whether I found it in a bundle, a sitemap, or a redirect chain. Columns
+  stay simple:</p>
+  <pre>$ cat engagement-name/notes/endpoints.md
+| Endpoint                  | Method | Auth | Notes                    |
+|---------------------------|--------|------|--------------------------|
+| /api/auth/prelogin        | POST   | no   | returns salt, keyVersion |
+| /api/auth/login           | POST   | no   | client-side password xform|
+| /api/user/profile         | GET    | yes  | tested, 401 unauth OK    |
+| /api/v2/session/refresh   | POST   | yes  | v1 deprecated? compare   |</pre>
+  <p>This table is the attack surface in one glance. When I am stuck on a flow, I
+  re-read it — the answer to "what haven't I looked at" is always in this file.
+  I update it every session, even when nothing changed; the timestamp of the last
+  update tells me how fresh the map is.</p>
+
+  <h2>4. The dead-end log</h2>
+  <p>This is the file most people skip, and the one that saves the most time.
+  Every hypothesis that did not pan out goes into <code>dead-ends.md</code> with
+  the date and the evidence:</p>
+  <pre>## 2026-10-05
+
+- /api/v1/export: identical 403 for valid session, expired session,
+  and garbage token. Not an access-control difference — the endpoint
+  is gated uniformly. Stop here.
+- Suspected second OAuth client_id in chunk-9f2a.js: turned out to be
+  a hardcoded test constant, never sent to the server. grep showed
+  zero references outside the dead code path.</pre>
+  <p>Why write down failures? Because your brain does not mark threads as closed.
+  Without this file you will re-test the same dead endpoint three sessions later,
+  burning an hour to rediscover what you already knew. A dead end written down
+  stays dead — and sometimes a dead end from March becomes a live thread in June
+  when the code changes, which is exactly why the date matters.</p>
+
+  <h2>5. The notebook is greppable</h2>
+  <p>Plain text notes across engagements compound. I keep all engagement folders
+  under one directory, which turns past work into a searchable corpus:</p>
+  <pre>$ grep -ri "prelogin" ~/engagements/*/notes/log.md | head
+$ grep -ri "double-sha256\|AES-ECB" ~/engagements/*/notes/*.md</pre>
+  <p>When a new target shows a familiar pattern — a salt returned before login, a
+  crypto primitive in a bundle — I check how I approached it last time instead of
+  starting from scratch. The notebook becomes a personal playbook written by my
+  past self.</p>
+
+  <h2>The rule</h2>
+  <p>Commands produce output. Responses produce observations. Observations produce
+  notes, the same day, with a date on them. Two weeks later, "I remember seeing
+  something about a v2 endpoint" is worthless. A dated note is evidence — it is
+  searchable, verifiable, and honest about what you actually knew and when.</p>
+  <p>The notebook is the least glamorous tool I own. It is also the one that
+  compounds the fastest.</p>
+
+  <div class="callout">
+    <strong>Disclosure note.</strong> Techniques described here are methodology only.
+    Specific findings from live engagements are reported privately to the vendor first
+    and published here only after remediation or explicit permission.
+  </div>
+
+  <a class="back-link" href="index.html">← all write-ups</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>
