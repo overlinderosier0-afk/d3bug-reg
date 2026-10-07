@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Scope discipline: the boring superpower — D3BUG.REG</title>
+<meta name="description" content="Written authorization first, documented boundaries, and a checklist you actually follow — the discipline that keeps research legal.">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> cat scope-discipline.md &nbsp;·&nbsp; 2026-10-07 &nbsp;·&nbsp; methodology</p>
+  <h1>Scope discipline: the boring superpower</h1>
+
+  <p>Scope is the least exciting part of security research and the one that matters
+  most. Every technique I have written about — recon, bundle tracing, manual
+  probing — sits inside a boundary someone agreed to. The moment a request falls
+  outside that boundary, the technique does not matter anymore. Discipline about
+  scope is what separates research from trespassing, and it is mostly a paperwork
+  habit, not a technical one.</p>
+
+  <div class="callout">
+    <strong>Scope first.</strong> Everything on this blog assumes written
+    authorization for the target. No scope, no recon — that rule is non-negotiable
+    in my workflow, and this post is about how I actually enforce it on myself.
+  </div>
+
+  <h2>1. Written authorization first</h2>
+  <p>Authorization must be <em>written</em> and <em>specific</em>: named assets,
+  what is allowed, what is excluded, and a contact on the other side. A vague
+  "take a look at our stuff" from a friend is not authorization. When I work
+  through a bug bounty program, the program's policy page is the written scope —
+  I save a dated copy of it the day the engagement starts, because policies get
+  edited and memory is unreliable:</p>
+  <pre>$ mkdir -p engagement-2026-10-07 &amp;&amp; cd engagement-2026-10-07
+$ curl -s https://example-program.com/policy &gt; policy-2026-10-07.html
+$ echo "2026-10-07: policy snapshot saved; scope reviewed below" &gt; notes.md</pre>
+  <p>If there is no program page and no signed document, there is no engagement.
+  I have walked away from interesting-looking targets on exactly this basis.</p>
+
+  <h2>2. Write the boundary down</h2>
+  <p>Every engagement folder I create gets a <code>scope.md</code> file before
+  anything else. It lists what is in scope, what is explicitly out, and any
+  special conditions (rate limits, no automated scanning, no social engineering).
+  It takes five minutes and removes an entire class of mistakes:</p>
+  <pre>$ cat scope.md
+# Scope — engagement 2026-10-07
+#
+# IN SCOPE:
+#   app.example.com, api.example.com
+#
+# OUT OF SCOPE (do not touch):
+#   *.example.com (all other hosts)
+#   blog.example.com, status.example.com
+#
+# CONDITIONS: manual testing only, business hours, report to X</pre>
+  <p>This file is the single source of truth for the engagement. When a subdomain
+  list or a JS bundle hints at a new host, the first question is not "what is it"
+  — it is "is it on the list".</p>
+
+  <h2>3. Re-read the boundary before every session</h2>
+  <p>Scope drift is real. You resolve 400 subdomains, one of them is interesting,
+  and you forget that only three of them were authorized. My counter is a
+  thirty-second ritual at the start of each session: open <code>scope.md</code>,
+  read it, and filter every target list through it before sending a single
+  request:</p>
+  <pre># keep only hosts that are explicitly in scope
+$ printf 'app.example.com\napi.example.com\n' &gt; in-scope.txt
+$ grep -Fxf in-scope.txt targets-today.txt &gt; targets-checked.txt
+$ diff &lt;(sort targets-today.txt) &lt;(sort targets-checked.txt)
+# anything listed by diff is dropped — no exceptions</pre>
+  <p>It feels pedantic. That is the point. The discipline has to be mechanical,
+  because judgment gets tired at 2 a.m. and checklists do not.</p>
+
+  <h2>4. Learn the gray zones</h2>
+  <p>Real scopes have edges that are not obvious. A few that come up constantly:</p>
+  <ul>
+    <li><strong>Subsidiaries and white-labels.</strong> Same product, different
+    company name, possibly a different legal entity — often out of scope unless
+    named.</li>
+    <li><strong>Third-party services the target uses.</strong> Payment processors,
+    CDNs, analytics endpoints — they belong to someone else.</li>
+    <li><strong>Staging and dev environments</strong> found during recon. Interesting
+    does not mean authorized.</li>
+    <li><strong>Other users' data</strong> you stumble into while testing your own
+    account. Seeing it is an accident; going back for more is a decision.</li>
+  </ul>
+  <p>My rule for all of these: if I have to argue with myself about whether it
+  counts, it does not count. I note it in the dead-end log and move on — or ask
+  the program/contact first.</p>
+
+  <h2>5. When something interesting is out of scope</h2>
+  <p>It will happen: during authorized recon you notice a misconfiguration on a
+  host that is explicitly excluded. The correct response is boring: stop, take a
+  dated note, and do not touch it again. If the host belongs to someone who can
+  act on it, a short, factual message to their security contact is appropriate.
+  What you do not do is "just take a quick look to confirm" — confirmation is
+  testing, and testing is what the scope governs.</p>
+
+  <h2>Why this compounds</h2>
+  <p>Scope discipline pays for itself in three ways. It keeps your accounts and
+  your name in good standing with programs. It makes your reports credible —
+  vendors listen differently to a researcher whose methodology is visibly clean.
+  And it removes the background anxiety from the work: every request I send, I
+  can point to the line in <code>scope.md</code> that allows it. That is the
+  boring superpower. Techniques find issues; discipline lets you keep finding
+  them.</p>
+
+  <div class="callout">
+    <strong>Disclosure note.</strong> Everything here is methodology only.
+    Specific findings from live engagements are reported privately to the vendor
+    first and published here only after remediation or explicit permission.
+  </div>
+
+  <a class="back-link" href="index.html">← all write-ups</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>
