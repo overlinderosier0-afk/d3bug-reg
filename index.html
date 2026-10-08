@@ -21,7 +21,7 @@
 <main class="container">
   <section class="hero">
     <p class="hero-kicker"><span class="prompt">$</span> whoami</p>
-    <h1>Security research,<br>documented.</h1>
+    <h1>Security research,<br><span class="hl">documented.</span></h1>
     <p class="hero-sub">Methodology, tooling, and lessons from real engagements.
     Authorized targets only — research notes, not exploit dumps.</p>
   </section>
@@ -29,6 +29,12 @@
   <section>
     <h2 class="section-title">Latest write-ups</h2>
     <div class="cards">
+      <a class="card" href="writeups/error-message-oracle.html">
+        <span class="card-tag">technique</span>
+        <h3>Error messages as an oracle</h3>
+        <p>Distinct error codes per failure mode reveal an application's layers — catalog them, compare them, and let the differences guide manual testing.</p>
+        <span class="card-date">2026-10-08</span>
+      </a>
       <a class="card" href="writeups/scope-discipline.html">
         <span class="card-tag">methodology</span>
         <h3>Scope discipline: the boring superpower</h3>
@@ -58,12 +64,6 @@
         <h3>Where tokens live: a field guide</h3>
         <p>localStorage, sessionStorage, cookies, memory, URL — a systematic inventory of where an app keeps its tokens, and why each location matters.</p>
         <span class="card-date">2026-10-03</span>
-      </a>
-      <a class="card" href="writeups/prelogin-endpoints.html">
-        <span class="card-tag">technique</span>
-        <h3>What prelogin endpoints reveal</h3>
-        <p>Before login there is often a setup call returning salts and flags — read it and the auth design explains itself.</p>
-        <span class="card-date">2026-10-02</span>
       </a>
     </div>
   </section>

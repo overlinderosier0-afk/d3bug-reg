@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Error messages as an oracle — D3BUG.REG</title>
+<meta name="description" content="How distinct error codes reveal an application's layers: catalog every failure response, compare them, and let the differences guide manual testing.">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> cat error-message-oracle.md &nbsp;·&nbsp; 2026-10-08 &nbsp;·&nbsp; technique</p>
+  <h1>Error messages as an oracle</h1>
+
+  <p>Most testers skim error responses on the way to the success path.
+  I do the opposite: error responses are some of the highest-signal input I get
+  during an engagement. A distinct error code per failure mode tells me where I am
+  inside the system — which layer rejected me, and what it expects instead.
+  This post is how I catalog and compare them, methodically, at a human pace.</p>
+
+  <div class="callout">
+    <strong>Scope first.</strong> Everything below assumes written authorization for the
+    target. No scope, no probing — error analysis is still interaction with the target.
+  </div>
+
+  <h2>Why errors are a map</h2>
+  <p>Think about what an error message actually is: the application failing to hide
+  a decision it made. When a login endpoint returns <code>ERR_NO_SESSION</code>
+  for a missing cookie, <code>ERR_BAD_TOKEN</code> for a wrong password, and
+  <code>ERR_RATE_LIMIT</code> after ten attempts, it just told you it has three
+  distinct layers: a session gate, a credential check, and a throttle. That is
+  architecture, handed over for free, one request at a time.</p>
+  <p>Generic responses tell you nothing; specific ones tell you everything. My job
+  is to collect them and compare — the <em>differences</em> between responses are
+  where the threads are.</p>
+
+  <h2>Step 1: Build the failure catalog</h2>
+  <p>Early in an engagement I make a deliberate pass over the interesting endpoints
+  and record how each one refuses bad input. Not by fuzzing — by hand, with
+  <code>curl</code>, changing one thing at a time: no cookie, wrong cookie,
+  missing parameter, wrong parameter, expired token, malformed JSON.</p>
+  <pre>$ curl -s -X POST https://target.example.com/api/session/check \
+    -H 'Content-Type: application/json' -d '{}' -w '\nHTTP %{http_code}\n'
+{"code":"ERR_NO_SESSION","msg":"session required"}
+HTTP 401
+
+$ curl -s -X POST https://target.example.com/api/session/check \
+    -H 'Content-Type: application/json' -d '{}' \
+    -H 'Cookie: session=wrongvalue' -w '\nHTTP %{http_code}\n'
+{"code":"ERR_BAD_SESSION","msg":"session invalid or expired"}
+HTTP 401</pre>
+  <p>Two 401s, two different codes. That difference means the session validation
+  happens in at least two steps — presence check, then validity check. Each row
+  of the catalog goes into my dated engagement notes immediately: endpoint,
+  input, response code, response body, timestamp. Memory is worthless; the note
+  is evidence.</p>
+
+  <h2>Step 2: Compare, don't just collect</h2>
+  <p>A catalog of errors becomes an oracle only when you start asking questions
+  of it. For every endpoint I compare three baselines: the unauthenticated
+  response, the authenticated response, and the mutated response. Then I ask:</p>
+  <ul>
+    <li>Do different <em>kinds</em> of bad input produce different codes, or one blanket rejection?</li>
+    <li>Do error codes change between languages or regions (different wording, same code — or different codes entirely)?</li>
+    <li>Does the error change after a specific sequence — e.g. a timeout code only after a valid first step?</li>
+    <li>Do some endpoints leak a stack trace or internal path while others don't?</li>
+  </ul>
+  <p>Uniform blanket rejections usually mean a dead end: one gate, nothing behind it.
+  Granular, sequenced error codes mean a pipeline — and pipelines have seams.</p>
+
+  <h2>Step 3: Follow the sequence</h2>
+  <p>Some of the most informative errors only appear in order. A multi-step flow
+  — prelogin, challenge, verify, grant — will usually hand you a different error
+  at each stage if you skip ahead or replay a step. I probe these sequences
+  slowly, noting which error appears at which point:</p>
+  <pre>$ # step 1: prelogin, valid request
+$ curl -s 'https://target.example.com/api/auth/prelogin' -d 'user=me'
+{"salt":"a3f9c1","stage":"challenge"}
+
+$ # step 2: challenge submitted with a garbage answer
+$ curl -s 'https://target.example.com/api/auth/challenge' -d 'answer=zzz'
+{"code":"ERR_CHALLENGE_MISMATCH","attempts_left":4}
+
+$ # step 2 replayed after the grant was already issued
+$ curl -s 'https://target.example.com/api/auth/challenge' -d 'answer=zzz'
+{"code":"ERR_STAGE_INVALID","msg":"flow expired"}</pre>
+  <p>The error changed between attempt 2 and attempt 3 — same input, different
+  response. That tells me the server tracks flow state and that the state
+  machine has edges I can map. I am not trying to break the flow; I am trying to
+  <em>understand</em> it, because understanding is what turns guessing into
+  testing.</p>
+
+  <h2>Step 4: Watch for the odd ones</h2>
+  <p>While cataloging, I flag anything that breaks the pattern:</p>
+  <ul>
+    <li>An error code that appears on only one endpoint (a different implementation, or a different developer).</li>
+    <li>Error details that differ between GET and POST to the same path.</li>
+    <li>Timeouts versus instant rejections — a timeout can mean the request went
+    somewhere expensive before failing.</li>
+    <li>Per-control or per-field error codes that name the specific control that
+    failed (useful for mapping which components are individually gated).</li>
+  </ul>
+  <p>Each oddity gets one line in the dead-end log or the thread list. Most lead
+  nowhere. The ones that don't are usually the ones I remember because the
+  catalog made them visible.</p>
+
+  <h2>The discipline</h2>
+  <p>This whole technique is one request at a time, reading every response.
+  No automation, no bulk enumeration — the catalog is built by attention, and
+  attention is exactly what you lose the moment you script it. At a human pace
+  you notice the <code>attempts_left</code> counter decrementing, the slightly
+  different JSON shape on one endpoint, the error that only shows up in one
+  language. Those details are the oracle. The technique is just giving them a
+  place to land.</p>
+
+  <div class="callout">
+    <strong>Disclosure note.</strong> Techniques described here are methodology only.
+    Specific findings from live engagements are reported privately to the vendor first
+    and published here only after remediation or explicit permission.
+  </div>
+
+  <a class="back-link" href="index.html">← all write-ups</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>
