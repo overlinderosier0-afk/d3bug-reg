@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Detecting anti-bot layers — D3BUG.REG</title>
+<meta name="description" content="Challenge pages, per-control error codes, and cookie requirements: mapping which endpoints are gated, from the outside, without touching the gate itself.">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> cat antibot-layer-detection.md &nbsp;·&nbsp; 2026-10-09 &nbsp;·&nbsp; technique</p>
+  <h1>Detecting anti-bot layers</h1>
+
+  <p>Most of my testing time is spent on applications that decide, before I even see a
+  login form, whether I am a human. Anti-bot layers sit in front of real endpoints and
+  change everything about what your probes return. If you do not map them first, you will
+  misread every response that follows. This post is about <em>detecting</em> these layers —
+  figuring out which endpoints are gated, from the outside, without touching the gate itself.</p>
+
+  <div class="callout">
+    <strong>Scope first.</strong> Everything below assumes written authorization for the
+    target. No scope, no recon — and detecting a gate never authorizes bypassing it.
+  </div>
+
+  <h2>1. The first hint is in the response you did not ask for</h2>
+  <p>Hit an endpoint with plain <code>curl</code>, no browser headers, and read what comes
+  back. A bot layer announces itself in patterns, not in single responses:</p>
+  <pre>$ curl -s -o /dev/null -w "%{http_code} %{size_download}\n" \
+  https://target.example.com/api/auth/login
+200 48213</pre>
+  <p>A <code>200</code> with a large body on an API endpoint that should return small JSON
+  is suspicious. Dump the headers and look for the classics — a <code>Set-Cookie</code> on
+  the very first response that your next request is expected to echo back, or a body that
+  is HTML instead of JSON:</p>
+  <pre>$ curl -s -i https://target.example.com/api/auth/login \
+  | grep -iE '^(HTTP|set-cookie|content-type)'
+HTTP/2 200
+set-cookie: __gate_token=eyJhbGciOi...; Path=/; HttpOnly
+content-type: text/html; charset=utf-8</pre>
+  <p>Then run the same request with a full browser User-Agent versus the default curl one.
+  If the two responses differ — a challenge page for curl, the real page for the browser —
+  you just observed User-Agent-based gating:</p>
+  <pre>$ UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+$ curl -s -A "$UA" -o browser.html https://target.example.com/api/auth/login
+$ curl -s -o curl.html https://target.example.com/api/auth/login
+$ wc -c browser.html curl.html
+  1243 browser.html
+ 48213 curl.html</pre>
+
+  <h2>2. Read the challenge, don't fight it</h2>
+  <p>Challenge pages are just HTML. Save one and read it like any other page: the title,
+  the inline JavaScript, the cookie it asks the client to set before retrying. Product-agnostic
+  signs of a bot challenge include JavaScript that runs and posts back a token, and
+  <code>document.cookie</code> writes that must be echoed on the next request.</p>
+  <p>The goal of this step is a map, not a bypass: which paths serve the challenge and
+  which pass through cleanly. Automating challenge-solving is interaction the engagement
+  did not authorize — on a bug bounty it will usually get your account, and sometimes your
+  IP, banned. Observe and note.</p>
+
+  <h2>3. Grep the bundles for sensor logic</h2>
+  <p>The client-side bundles often ship the detection logic in the open. The same
+  <code>grep</code> pass I use for endpoint extraction doubles as a sensor survey:</p>
+  <pre>$ grep -rhoiE '(webdriver|navigator\.userAgent|canvas\.toDataURL|deviceMemory|plugins\.length)' *.js \
+  | sort | uniq -c | sort -rn | head</pre>
+  <p>These strings tell you what the client collects about its environment. That explains
+  why headless <code>curl</code> behaves differently from a real browser — and it tells
+  you which behaviors are being measured, which is all the information you need for an
+  accurate map. You are reading the application's own description of its defenses.</p>
+
+  <h2>4. Per-control error codes are a gating signal</h2>
+  <p>Some endpoints return distinct error codes per control: a missing cookie produces one
+  code, an invalid challenge token another, a rate-limited client a third. Catalog them
+  the same way you would catalog any error oracle — one request per variation, response
+  written down immediately:</p>
+  <pre>$ curl -s https://target.example.com/api/auth/login -H "Content-Type: application/json" \
+  -d '{"user":"probe","pass":"probe"}'
+{"code":"ERR_GATE_COOKIE","msg":"session cookie required"}</pre>
+  <p>Each distinct code is a layer of the gate naming itself. The catalog becomes the
+  legend for your gate map: when a probe fails later, you can say <em>which</em> layer
+  stopped it instead of guessing.</p>
+
+  <h2>5. Build the gate map in your notes</h2>
+  <p>Now combine everything into a simple table in the engagement notebook — one row per
+  endpoint, one column per condition:</p>
+  <pre>endpoint                 | plain curl | browser UA | cookie present
+/api/auth/login          | challenge  | 200        | 200
+/api/auth/prelogin       | 200        | 200        | 200
+/api/universal/redirect  | 403        | 200        | 200</pre>
+  <p>Why this matters: probing a gated endpoint with <code>curl</code> and reading a
+  <code>403</code> as "dead end" is a misread. The gate is part of the context, not the
+  answer. And when you write the report, the gate map is evidence — you document the
+  defense's presence and behavior. A bypass attempt is a different activity with different
+  authorization, and on most of my engagements it is explicitly out of scope.</p>
+
+  <div class="callout">
+    <strong>Disclosure note.</strong> Techniques described here are methodology only.
+    Specific findings from live engagements are reported privately to the vendor first
+    and published here only after remediation or explicit permission.
+  </div>
+
+  <a class="back-link" href="index.html">← all write-ups</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>
