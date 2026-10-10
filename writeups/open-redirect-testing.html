@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Testing open redirects safely — D3BUG.REG</title>
+<meta name="description" content="Probe redirect_uri validation with harmless payloads and read the error responses — a manual, methodology-only walkthrough of open-redirect testing on authorized targets.">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> cat open-redirect-testing.md &nbsp;·&nbsp; 2026-10-10 &nbsp;·&nbsp; technique</p>
+  <h1>Testing open redirects safely</h1>
+
+  <p>Login and OAuth flows redirect users constantly — after authentication, after a
+  consent screen, after a session handoff. Every endpoint that accepts a redirect
+  destination as a parameter is a question: <em>does the server validate where it
+  sends me?</em> Testing that question safely is the whole technique. Here is how I
+  do it, one request at a time, without ever weaponizing the result.</p>
+
+  <div class="callout">
+    <strong>Scope first.</strong> Everything here assumes written authorization for the
+    target. Redirect tests below use harmless, self-owned destinations only — a
+    domain I control or a clearly non-existent host that proves the redirect path
+    without sending anything anywhere real. No scope, no probes.
+  </div>
+
+  <h2>1. Find the redirect parameter</h2>
+  <p>Before touching any endpoint, I figure out which parameters actually steer a
+  redirect. The usual suspects come straight out of the bundles — this is the same
+  grep pass I run for every recon:</p>
+  <pre>grep -rhoE '(redirect_uri|redirect|return_url|next|continue|callback)[^"]{0,60}' *.js | sort -u</pre>
+  <p>Then I map the flow in the browser's DevTools network tab: click through the
+  login sequence once as a normal user and watch where <code>redirect_uri</code> or
+  <code>next</code> parameters appear. I am looking for three things: which parameter
+  carries the destination, which endpoint consumes it, and what the value looks like
+  (full URL, path-only, or opaque token).</p>
+
+  <h2>2. Establish the baseline first</h2>
+  <p>Never send a payload before you know what "normal" looks like. I run the flow
+  with the legitimate destination and capture the exact behavior — status code,
+  <code>Location</code> header, and body:</p>
+  <pre>curl -s -o /dev/null -D - "https://target.example.com/api/universal/login?redirect_uri=https%3A%2F%2Ftarget.example.com%2Fdashboard"
+# watch: 302 Location, 400 error body, or something else?</pre>
+  <p>This baseline is the reference point. Every later probe is compared against it,
+  the same compare-responses discipline I use everywhere else: identical behavior
+  across different inputs usually means validation is uniform; different behavior
+  means a thread.</p>
+
+  <h2>3. The harmless payload ladder</h2>
+  <p>My payloads are deliberately boring. The goal is to learn the validator's
+  logic, not to land anywhere. One request, one read, one note:</p>
+  <pre># full URL, harmless self-owned domain — does it honor an absolute URL?
+curl -s -o /dev/null -D - "https://target.example.com/api/universal/login?redirect_uri=https%3A%2F%2Fexample.invalid%2F"
+
+# protocol-relative — some validators miss the missing scheme
+curl -s -o /dev/null -D - "https://target.example.com/api/universal/login?redirect_uri=%2F%2Fexample.invalid%2F"
+
+# path-only — the "legit" shape most apps intend
+curl -s -o /dev/null -D - "https://target.example.com/api/universal/login?redirect_uri=%2Fdashboard"</pre>
+  <p><code>example.invalid</code> is intentional: it is guaranteed unroutable, so even
+  if the server blindly honors it, nothing and nobody is affected. I never point a
+  probe at a real third-party site — that would turn a methodology test into someone
+  else's incident.</p>
+
+  <h2>4. Read the rejection, not just the redirect</h2>
+  <p>A rejection is data. When the server says no, <em>how</em> it says no tells you
+  what kind of validation runs. I compare each rejected response against the
+  baseline:</p>
+  <pre># is the error generic or does it leak the validator's rule?
+curl -s "https://target.example.com/api/universal/login?redirect_uri=%2F%2Fexample.invalid%2F" | jq .</pre>
+  <p>Signals I catalog: a 400 with "invalid redirect" (allowlists or scheme checks),
+  a silent fallback to a default page (fails closed — good), a 200 rendering an
+  error page in a specific language (which, incidentally, also tells me about the
+  app's locale routing). Identical error bodies for every malformed input suggest
+  one choke point; different errors per input shape suggest layered checks —
+  and each layer is worth documenting in the notes.</p>
+
+  <h2>5. Know when to stop</h2>
+  <p>The open-redirect test ends at the validation boundary. If the server accepts
+  arbitrary external destinations, I do not chain it into anything — no crafted
+  links, no proof-of-concept pages, no demonstration against a real recipient. I
+  record the observation, classify it honestly in the notebook, and it goes into the
+  disclosure report through the normal channel. The technique is <em>reading</em>
+  the validator; anything beyond that is a different engagement with a different
+  scope.</p>
+  <p>That restraint is also practical: a minimal, documented probe produces a clean
+  report. A maximal one produces questions I cannot answer cleanly — and clean
+  reports are what vendors act on.</p>
+
+  <h2>What this gives you</h2>
+  <p>After this pass I know: which parameters steer redirects, what shapes the
+  validator accepts, where it fails closed, and what its error messages reveal
+  about its layers. It is a small, self-contained module — thirty minutes of work,
+  a handful of requests, a page of dated notes — and it slots into the same
+  notebook as everything else.</p>
+  <p>Safe redirect testing is not about finding a bypass. It is about describing the
+  validator so precisely that the bypass question answers itself — and then
+  stopping exactly there.</p>
+
+  <div class="callout">
+    <strong>Disclosure note.</strong> Specific findings from live engagements are reported
+    privately to the vendor first and published here only after remediation or explicit
+    permission.
+  </div>
+
+  <a class="back-link" href="index.html">← all write-ups</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>
