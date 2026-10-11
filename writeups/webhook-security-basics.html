@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Webhooks: signatures and idempotency — D3BUG.REG</title>
+<meta name="description" content="How to verify webhook signatures with HMAC, replay events safely with curl, and why idempotency keys matter when payments are involved.">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> cat webhooks.md &nbsp;·&nbsp; 2026-10-11 &nbsp;·&nbsp; technique</p>
+  <h1>Webhooks: signatures and idempotency</h1>
+
+  <p>A webhook is just an HTTP POST from someone else's server to yours.
+  That simplicity is what makes webhook receivers a favorite target and,
+  more importantly for us, a rich surface to read during recon.
+  Here is how I think about webhook design — and how I verify a receiver
+  that I am authorized to test.</p>
+
+  <div class="callout">
+    <strong>Scope first.</strong> Everything below assumes written authorization for the
+    target. No scope, no recon — that rule is non-negotiable in my workflow.
+  </div>
+
+  <h2>1. Signatures: the only trust mechanism that matters</h2>
+  <p>A well-designed webhook carries a signature header — the sender computes
+  <code>HMAC-SHA256(payload, secret)</code> and the receiver recomputes it before
+  doing anything. No signature, no trust: without it, anyone who finds the endpoint
+  URL can forge events.</p>
+  <p>Verifying by hand is one <code>openssl</code> call, and it is worth doing when
+  you are testing your own receiver:</p>
+  <pre>SECRET="whsec_test_shared_secret"
+PAYLOAD='{"event":"payment.confirmed","ref":"TH-ABC123"}'
+SIG=$(printf '%s' "$PAYLOAD" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print $2}')
+curl -s -X POST https://app.example.com/webhooks/payments \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Signature: $SIG" \
+  -d "$PAYLOAD" -w '\nHTTP %{http_code}\n'</pre>
+  <p>Then replay the same request with a tampered byte in the payload, keeping the
+  old signature. If the receiver still returns 200, it is not verifying — it is
+  decorating its headers.</p>
+
+  <h2>2. Compare the acceptance and the rejection</h2>
+  <p>This is the response-comparison habit applied to webhooks. I fire four variants
+  at my own receiver and record what comes back each time:</p>
+  <pre># 1. valid payload + valid signature
+# 2. valid payload + wrong signature
+# 3. tampered payload + original signature
+# 4. no signature header at all</pre>
+  <p>Cases 2, 3, and 4 should all be rejected, and ideally with the same response:
+  a single rejection path. If "wrong signature" returns 400 but "missing signature"
+  returns 200, the receiver has two code paths and one of them is a bypass.</p>
+  <p>Also watch for the classic mistake: <code>hmac.compare_digest</code> exists for a
+  reason — a naive <code>==</code> on hex strings leaks a timing oracle. Reading the
+  verification code is faster than measuring the oracle.</p>
+
+  <h2>3. Replay: what a captured event buys an attacker</h2>
+  <p>Signatures authenticate the sender, not the freshness of the message.
+  An attacker who captures a valid signed event can replay it tomorrow and the
+  signature will still check out. That is why serious senders add a timestamp to
+  the signed payload:</p>
+  <pre>curl -s -X POST https://app.example.com/webhooks/payments \
+  -H "X-Webhook-Signature: $SIG_OLD" \
+  -H "X-Webhook-Timestamp: $(date -d '2 days ago' +%s)" \
+  -d "$PAYLOAD" -w '\nHTTP %{http_code}\n'</pre>
+  <p>The receiver should reject timestamps outside a small window — five minutes is
+  a sane default. When I test a receiver, I record the timestamp it accepted and
+  replay the identical signed event an hour later. If the second call is processed
+  as a new event, the receiver has no replay protection at all.</p>
+
+  <h2>4. Idempotency: the receiver's own safety net</h2>
+  <p>Even with perfect signatures and timestamps, senders retry. Networks drop ACKs,
+  queues redeliver, and the same event can legitimately arrive twice. If processing
+  the event twice credits an account twice, the bug is in the receiver's design.</p>
+  <p>The standard answer is an idempotency key: store the event ID when you first
+  process it, and make re-processing a no-op. A quick way to check the behavior
+  from the outside:</p>
+  <pre>for i in 1 2 3; do
+  curl -s -X POST https://app.example.com/webhooks/payments \
+    -H "X-Webhook-Signature: $SIG" \
+    -d '{"event":"payment.confirmed","id":"evt_9f27c1","ref":"TH-ABC123"}'
+  echo " -- delivery $i"
+done</pre>
+  <p>The effect should happen exactly once no matter how many times you deliver.
+  I once mapped this against a payment-integration testbed I control: three
+  deliveries, one ledger entry. That invariant — "delivery N times, effect once" —
+  is the whole contract. Everything else is implementation detail.</p>
+
+  <h2>5. What to look for when the docs exist</h2>
+  <p>Many providers publish their webhook signing scheme. When I am authorized to
+  assess an integration, the provider docs tell me what to grep for in the
+  receiver's code or behavior:</p>
+  <ul>
+    <li>Which fields are included in the signed payload — raw body, or a canonical
+    subset? Signing only some fields means the unsigned fields are attacker-controlled.</li>
+    <li>Whether the secret is per-integration and rotatable. One global secret for
+    all merchants is a design smell worth noting.</li>
+    <li>Whether the receiver fetches the event back from the provider's API before
+    acting on it — the strongest pattern, because the authoritative state comes
+    from the provider, not from the POST body.</li>
+  </ul>
+
+  <h2>Why this is a recon topic</h2>
+  <p>Webhook endpoints appear in JS bundles more often than you would expect —
+  string-hunt for <code>webhook</code>, <code>callback_url</code>, or signature
+  header names and you will find the receiver's URL before you even visit it.
+  Reading that code path tells you how the application trusts the outside world,
+  and trust boundaries are where findings live.</p>
+  <p>Test it at a human pace, one crafted request at a time, against targets you
+  have permission to touch. The technique is cheap; the discipline is the point.</p>
+
+  <div class="callout">
+    <strong>Disclosure note.</strong> Techniques described here are methodology only.
+    Specific findings from live engagements are reported privately to the vendor first
+    and published here only after remediation or explicit permission.
+  </div>
+
+  <a class="back-link" href="index.html">← all write-ups</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>
