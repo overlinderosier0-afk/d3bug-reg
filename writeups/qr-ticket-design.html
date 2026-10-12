@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Designing tamper-evident QR tickets — D3BUG.REG</title>
+<meta name="description" content="HMAC-signed payloads, expiry, and single-use semantics: how to design QR tickets that can't be forged or reused.">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> cat qr-ticket-design.md &nbsp;·&nbsp; 2026-10-12 &nbsp;·&nbsp; technique</p>
+  <h1>Designing tamper-evident QR tickets</h1>
+
+  <p>A QR code on a ticket is just a picture of a string. If the string is
+  <code>ticket=12345</code>, anyone can print their own. The security of a QR
+  ticket does not live in the code itself — it lives in the design around the
+  payload: signatures, expiry, and single-use semantics. Here is how I think
+  about each layer, with commands to try on a terminal.</p>
+
+  <div class="callout">
+    <strong>Scope first.</strong> Everything here assumes written authorization for the
+    target. No scope, no recon.
+  </div>
+
+  <h2>1. Sign the payload, don't just encode it</h2>
+  <p>The foundation is an HMAC signature. The payload is a small JSON object
+  (ticket id, event id, issued-at timestamp), and a secret known only to the
+  issuer produces a tag over it. The QR carries <em>payload + signature</em>, and
+  the scanner verifies the tag before trusting anything else.</p>
+  <p>Generate and verify a tag locally to see the mechanics:</p>
+  <pre>$ payload='{"ticket":"T-0042","event":"E-7","iat":1760275200}'
+$ echo -n "$payload" | openssl dgst -sha256 -hmac "server-side-secret"
+SHA2-256(stdin)= 9f2c...truncated
+$ echo -n "$payload" | openssl dgst -sha256 -hmac "wrong-secret"
+SHA2-256(stdin)= 4b1d...truncated</pre>
+  <p>Change one character in the payload and the tag changes completely. That is
+  the property you are buying: the check-in app can detect any alteration without
+  trusting the ticket holder. The one non-negotiable rule is that the signing
+  secret never leaves the server — if a client-side bundle can sign tickets, the
+  whole design collapses. I verify secrets are server-only by grepping shipped
+  bundles for the key name used in signing code (see
+  <code>reading-minified-js</code>).</p>
+
+  <h2>2. Bind the ticket to an expiry window</h2>
+  <p>A valid signature is not enough if the ticket is valid forever. Include an
+  expiration claim inside the signed payload so that even a leaked screenshot
+  stops working after the event:</p>
+  <pre>$ python3 -c "
+import hmac, hashlib, json, time
+key = b'server-side-secret'
+payload = json.dumps({'ticket':'T-0042','event':'E-7',
+                      'iat': int(time.time()),
+                      'exp': int(time.time()) + 6*3600})
+tag = hmac.new(key, payload.encode(), hashlib.sha256).hexdigest()
+print(payload + '.' + tag)
+"</pre>
+  <p>The check-in flow becomes: verify signature, then check
+  <code>now &lt; exp</code>, then check the ticket has not been scanned already.
+  Expiry also bounds the damage of a lost phone — a ticket issued months ahead
+  is dangerous; a ticket whose window covers the event plus a grace period is
+  not.</p>
+
+  <h2>3. Single-use semantics: scan once, then burn</h2>
+  <p>Signatures and expiry stop forgery. They do not stop <em>copying</em>.
+  A screenshot of a valid ticket scans green just as well as the original. The
+  fix is server-side state: the first scan marks the ticket used, and every
+  later scan of the same ticket id is rejected.</p>
+  <p>The state transition has to be atomic — <code>mark-used</code> must happen
+  inside the same database transaction as the read, or two scanners at two
+  entrances will both wave the same screenshot through. Offline scanners are the
+  hard case: pre-distribute the list of issued ticket ids <em>with their
+  signatures</em>, validate locally, and reconcile against the central
+  "used" set as soon as connectivity returns. The offline copy must never
+  include the signing secret, only the issued tags.</p>
+
+  <h2>4. What I check when I review a QR ticket design</h2>
+  <p>When an authorized engagement touches ticketing, I walk this checklist:</p>
+  <ul>
+    <li>Is the payload signed with a server-side key? (unsigned QR = raw
+    identifier; decode it with <code>zbarimg</code> and read the string)</li>
+    <li>Is there an expiry claim, and is it enforced — or just present?</li>
+    <li>Is a used ticket rejected on a <em>second</em> scan, from a different
+    device and a different network path?</li>
+    <li>Does the check-in app fail closed — invalid signature means reject,
+    not retry or fallback to a "manual override"?</li>
+    <li>Are ticket ids unguessable (random, not sequential) so one valid ticket
+    can't seed the next?</li>
+  </ul>
+  <p>Each question maps to one human-paced request pair: scan a ticket, then
+  replay or mutate it and compare the responses. Status codes and error
+  messages tell you whether the design holds.</p>
+
+  <h2>5. What NOT to put in the payload</h2>
+  <p>QR contents are visible to everyone who photographs the screen. Never
+  encode PII beyond the minimum (a ticket id is enough — names, phone numbers,
+  and emails belong behind the scanner's lookup), never encode the event's
+  internal database row, and never encode anything that looks like a credential
+  or a reset token. The payload is a public string; treat it like one.</p>
+
+  <div class="callout">
+    <strong>Disclosure note.</strong> Specific findings from live engagements are reported
+    privately to the vendor first and published here only after remediation or explicit
+    permission.
+  </div>
+
+  <a class="back-link" href="index.html">← all write-ups</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>
