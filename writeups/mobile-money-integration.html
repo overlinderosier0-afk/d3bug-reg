@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Integrating mobile-money payments manually — D3BUG.REG</title>
+<meta name="description" content="Reference-based manual reconciliation for mobile-money checkouts: short refs, pending/confirmed states, and idempotent settlement.">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> cat mobile-money-integration.md &nbsp;·&nbsp; 2026-10-13 &nbsp;·&nbsp; methodology</p>
+  <h1>Integrating mobile-money payments manually</h1>
+
+  <p>In a lot of markets there is no payment API, or the API costs more than the
+  business makes. People pay from their phones, paste a reference into a transfer
+  note, and somebody on your side confirms the money arrived. That sounds fragile,
+  and it is, unless you design the process like an engineer. Here is the manual
+  reconciliation flow I use: reference-based, state-machine driven, and built so a
+  double-click can never double-spend you.</p>
+
+  <div class="callout">
+    <strong>Scope first.</strong> Everything here is process design for your own
+    checkout. No provider internals, no workarounds, no tricks against anyone's
+    systems: you move money through the provider's own app, exactly like any
+    customer would.
+  </div>
+
+  <h2>1. The reference is the whole integration</h2>
+  <p>Without a webhook, the short reference code is the only thing that links a
+  payment on the provider's network to an order in your database. So the reference
+  has to be short enough to type on a phone keypad, unique enough to never collide,
+  and readable enough that a human can match it at a glance. I generate mine like
+  this:</p>
+  <pre>REF="MM-$(openssl rand -hex 4 | tr 'a-z' 'A-Z')"
+echo "$REF"
+# MM-3F9A2C1D</pre>
+  <p>Eight hex characters after a short prefix. A phone user can copy-paste it or
+  read it out loud without errors, and the collision space is large enough that
+  you will never generate the same one twice. Store it as a unique column and let
+  the database enforce that.</p>
+
+  <h2>2. Model the order as a state machine</h2>
+  <p>The dangerous mistake is a boolean <code>paid</code> column. Money has a
+  lifecycle: created, paid by the user, seen by you, settled. Model it with states,
+  not flags:</p>
+  <pre>CREATE TABLE payments (
+  ref         TEXT PRIMARY KEY,
+  amount_cents INT  NOT NULL,
+  status      TEXT NOT NULL DEFAULT 'pending'
+              CHECK (status IN ('pending','confirmed','expired','refunded')),
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  confirmed_at TIMESTAMPTZ
+);</pre>
+  <p><code>pending</code> means the order exists and you are waiting for money.
+  <code>confirmed</code> means a human matched the transfer. <code>expired</code>
+  means the window closed and nobody paid. Every order starts pending; nothing is
+  ever delivered from any other state. A pending order list is your daily to-do
+  list:</p>
+  <pre>psql -c "SELECT ref, amount_cents, created_at FROM payments
+  WHERE status = 'pending' ORDER BY created_at;"</pre>
+
+  <h2>3. Expire aggressively</h2>
+  <p>A pending order that lives forever is a pending order someone can pay "late"
+  into confusion. Give each order a window (two hours is a sane default) and sweep
+  the stragglers on a schedule:</p>
+  <pre>psql -c "UPDATE payments SET status = 'expired'
+  WHERE status = 'pending'
+    AND created_at &lt; now() - interval '2 hours';"</pre>
+  <p>Run it from cron every few minutes. Expiry is not rejection: the customer can
+  always create a fresh order with a fresh reference. What expiry buys you is a
+  clean matching problem. A pending list with three items is easy to reconcile; a
+  pending list with three hundred is where money goes missing.</p>
+
+  <h2>4. Settle idempotently</h2>
+  <p>This is the rule that saves you. Confirming an order must be a state
+  transition guarded by the current state, so that confirming the same reference
+  twice does exactly nothing the second time. Never read-then-write; make the
+  transition atomic:</p>
+  <pre>psql -c "UPDATE payments
+  SET status = 'confirmed', confirmed_at = now()
+  WHERE ref = 'MM-3F9A2C1D' AND status = 'pending';"</pre>
+  <p>Check the affected row count. One row means you just confirmed it. Zero rows
+  means it was already confirmed, expired, or the reference is wrong, and in all
+  three cases there is nothing to deliver twice. This single <code>WHERE</code>
+  clause is the whole difference between "reconciliation" and "hoping".</p>
+
+  <h2>5. The human loop: matching transfers by hand</h2>
+  <p>The admin view is a list of pending orders and the provider's own transaction
+  history side by side. The operator's job is mechanical: find the transfer whose
+  note contains the reference, check the amount matches to the cent, then run the
+  guarded confirm from section 4. Three failure modes come up constantly:</p>
+  <ol>
+    <li><strong>Wrong amount.</strong> Customer typed the wrong total. Do not
+    confirm; mark it expired and ask for a new order. Never "adjust" a payment to
+    match an order.</li>
+    <li><strong>Missing reference.</strong> The transfer note is empty or garbled.
+    You cannot attribute it, so it stays unmatched. Confirm nothing. A dated note
+    in your log ("2026-10-13 09:41: unmatched incoming transfer, no ref") beats
+    memory every time.</li>
+    <li><strong>Same reference, two transfers.</strong> A customer pays twice for
+    the same order. The first confirm transitions to confirmed; the second confirm
+    hits zero rows because of the guarded <code>WHERE</code>, and the duplicate
+    money gets refunded, not silently kept.</li>
+  </ol>
+
+  <h2>Why this works</h2>
+  <p>Manual reconciliation gets a bad reputation because people treat it as
+  "someone checks the phone". It is reliable when the reference is unique, the
+  state machine has an expiry, and settlement is an idempotent transition. Those
+  are three database constraints and one cron job, not a payments team.</p>
+  <p>The design also degrades honestly. If the operator is offline for a day,
+  orders expire instead of piling up; if a customer disputes a charge, the
+  confirmed_at timestamp and the matching reference are the paper trail. Build the
+  boring parts right and the manual flow is as auditable as an API one.</p>
+
+  <div class="callout">
+    <strong>Disclosure note.</strong> Specific findings from live engagements are reported
+    privately to the vendor first and published here only after remediation or explicit
+    permission.
+  </div>
+
+  <a class="back-link" href="index.html">← all write-ups</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>
