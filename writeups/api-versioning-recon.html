@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>API versioning: v1 vs v2 tells a story — D3BUG.REG</title>
+<meta name="description" content="Versioned API endpoints are a fossil record of the product: how to find /api/v1 and /api/v2 in JS bundles and compare their behavior manually.">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> cat api-versioning-recon.md &nbsp;·&nbsp; 2026-10-14 &nbsp;·&nbsp; technique</p>
+  <h1>API versioning: v1 vs v2 tells a story</h1>
+
+  <p>When a product grows, its API grows with it — and old versions rarely die quietly.
+  Every <code>/api/v1/</code> still answering next to a <code>/api/v2/</code> is a
+  fossil: a record of how the backend used to think about auth, input, and output.
+  Comparing versions is not about finding a vulnerability; it is about understanding
+  the application's history so you know where the interesting inconsistencies live.
+  Here is how I map versioned endpoints and compare them, manually.</p>
+
+  <div class="callout">
+    <strong>Scope first.</strong> Everything below assumes written authorization for the
+    target. No scope, no recon — that rule is non-negotiable in my workflow.
+  </div>
+
+  <h2>1. Find the version strings in the bundles</h2>
+  <p>Modern clients talk to the API through JavaScript, so the version history is
+  sitting in the bundles. Once I have them on disk (see my recon methodology post),
+  the version surface shows up with two cheap greps:</p>
+  <pre>grep -rhoE '"/api/v[0-9][^"]*"' *.js | sort -u
+grep -rhoE '"v[0-9]":|"apiVersion":"[^"]+"|"version":"[0-9]' *.js | sort -u</pre>
+  <p>The first catches path-versioned APIs (<code>/api/v1/users</code>); the second
+  catches APIs that carry the version in headers or JSON bodies. I also grep for
+  <code>legacy</code>, <code>deprecated</code>, and <code>sunset</code> — developers
+  leave those comments for themselves, and they are honest about what is old.</p>
+
+  <h2>2. Build the version map</h2>
+  <p>Raw hits are noise. I group them into a simple table per resource: which
+  endpoints exist under v1, which under v2, which under both. The interesting rows
+  are the asymmetric ones — a resource that exists only in v1, or one whose v2
+  version accepts different parameters. Example of how I extract the pairs:</p>
+  <pre>grep -rhoE '"/api/(v1|v2)/[a-z_]+"' *.js | sort -u \
+  | awk -F/ '{print $3, $4}' | sort | uniq -c | sort -rn</pre>
+  <p>This gives me one line per version-plus-resource, with the count telling me how
+  heavily each is referenced in the client. A v1 resource referenced dozens of times
+  while its v2 sibling barely appears is a story: either the migration is
+  incomplete, or the old endpoint still does something the new one does not.</p>
+
+  <h2>3. Compare behaviors side by side, at human pace</h2>
+  <p>With the map in hand, I query both versions of the same resource with
+  <code>curl</code> — one request at a time, reading each response fully.
+  I always start with the same input and diff the outputs:</p>
+  <pre>curl -s -H "Authorization: Bearer $TOKEN" \
+  https://target.example.com/api/v1/profile | jq . &gt; v1.json
+curl -s -H "Authorization: Bearer $TOKEN" \
+  https://target.example.com/api/v2/profile | jq . &gt; v2.json
+diff v1.json v2.json</pre>
+  <p>I run the same comparison unauthenticated, with a valid session, and with
+  malformed input — and <em>compare the responses</em>. Identical responses across
+  versions mean consistent handling; different responses mean a thread to pull.
+  The <code>-i</code> flag is worth using here too: version migrations sometimes
+  advertise themselves in headers like <code>Deprecation</code> or
+  <code>Sunset</code>, which tell you the old endpoint's intended lifetime.</p>
+
+  <h2>4. Read what the differences suggest</h2>
+  <p>Behavior gaps between versions usually fall into a few shapes. Field-level
+  differences (v1 returns more fields than v2) suggest the newer version trimmed
+  the data model — the old one still speaks the old schema. Status-code differences
+  (v1 returns 200 where v2 returns 404) suggest routing was rewritten rather than
+  migrated. Auth differences (v1 and v2 accepting different token formats) suggest
+  the auth layer changed between releases. None of this is a finding on its own.
+  It is context: when you later test something, you test it against the version
+  that handles it most permissively, because that is where inconsistencies live.</p>
+
+  <h2>5. Watch for shadow versions</h2>
+  <p>Sometimes the bundles reference a version that is not in the docs and not in
+  the UI flows — a <code>v0</code>, an <code>internal</code> path, a
+  <code>beta</code> prefix. I verify each one exists with a single request and log
+  it. Most turn out to be dead code or build leftovers. The point is not that shadow
+  versions are dangerous; the point is that an unmapped endpoint is an unknown, and
+  unknowns are what recon exists to eliminate.</p>
+
+  <h2>6. Log versions in the engagement notebook</h2>
+  <p>Versions change during an engagement — a v2 ships mid-test, a v1 goes quiet.
+  I date-stamp the version map the same day I build it, so a behavior that looks
+  odd two weeks later can be checked against what was true at the time. A dated
+  note is the difference between "I remember a v1 doing this" and evidence.</p>
+
+  <p>Versioning is one of the cheapest signals in recon: two greps and a diff, and
+  you hold the application's history in your hands. The story it tells is never
+  "this is broken" — it is "this is how it grew." Understanding that growth is
+  what turns a list of endpoints into a map worth testing.</p>
+
+  <div class="callout">
+    <strong>Disclosure note.</strong> Techniques described here are methodology only.
+    Specific findings from live engagements are reported privately to the vendor first
+    and published here only after remediation or explicit permission.
+  </div>
+
+  <a class="back-link" href="index.html">← all write-ups</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>
