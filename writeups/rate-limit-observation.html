@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Observing rate limits without tripping them — D3BUG.REG</title>
+<meta name="description" content="429s, Retry-After headers, and soft throttling: notice rate limiting during normal manual testing and read what it says about the defenses.">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> cat rate-limit-observation.md &nbsp;·&nbsp; 2026-10-15 &nbsp;·&nbsp; technique</p>
+  <h1>Observing rate limits without tripping them</h1>
+
+  <p>Rate limiting is a defense you meet long before you go looking for it. Send a few
+  login probes in a row during normal manual testing, and at some point the server
+  answers with something other than a login result. That moment — the 429, the slowed
+  response, the <code>Retry-After</code> header — is free information about how the target
+  defends itself. This post is about noticing it, reading it, and writing it down,
+  without ever trying to get past it.</p>
+
+  <div class="callout">
+    <strong>Scope first.</strong> Everything here assumes written authorization for the
+    target. No scope, no recon.
+  </div>
+
+  <h2>1. The signs, in order of subtlety</h2>
+  <p>Rate limiting shows up in layers. From most explicit to most quiet:</p>
+  <ol>
+    <li><strong>429 Too Many Requests</strong> — the server tells you outright.</li>
+    <li><strong><code>Retry-After</code> header</strong> — a number of seconds, or an HTTP date,
+    telling well-behaved clients when to come back.</li>
+    <li><strong><code>X-RateLimit-*</code> headers</strong> — <code>Limit</code>,
+    <code>Remaining</code>, <code>Reset</code>: the defense documenting itself in
+    every response.</li>
+    <li><strong>Soft signs</strong> — responses that suddenly take longer, a challenge page
+    that only appears after several attempts, an endpoint that keeps returning 200 but
+    with an empty body.</li>
+  </ol>
+  <p>The first three are documentation. The last one is the interesting one.</p>
+
+  <h2>2. Read the headers with curl</h2>
+  <p>When a request behaves oddly, look at the response headers before anything else:</p>
+  <pre>$ curl -sSI https://target.example.com/api/v1/login \
+  | grep -iE 'ratelimit|retry-after|HTTP'
+HTTP/2 429
+retry-after: 60
+x-ratelimit-limit: 10
+x-ratelimit-remaining: 0
+x-ratelimit-reset: 1760510400</pre>
+  <p>That response says: 10 requests per window, the window is spent, come back in
+  60 seconds. The <code>x-ratelimit-reset</code> value is a Unix timestamp — translate it:</p>
+  <pre>$ date -d @1760510400 -u
+Wed Oct 15 14:40:00 UTC 2026</pre>
+  <p>Now you know exactly when the window resets, and you can schedule the rest of your
+  manual testing around it instead of hammering into a closed door.</p>
+
+  <h2>3. Soft limits are limits too</h2>
+  <p>Some applications never send a 429. They throttle quietly: each consecutive
+  response takes a little longer, or a bot-mitigation challenge appears only after
+  the Nth attempt on the login endpoint. To check the timing hypothesis, compare
+  response times rather than relying on feel:</p>
+  <pre>$ curl -s -o /dev/null -w "%{time_total}s\n" https://target.example.com/api/v1/login
+0.212s
+# ... a few manual attempts later ...
+$ curl -s -o /dev/null -w "%{time_total}s\n" https://target.example.com/api/v1/login
+2.431s</pre>
+  <p>A jump from 0.2s to 2.4s on the same request is a signal. It tells you a throttle
+  kicked in even though the status code never changed. Same rule as with hard limits:
+  note it, wait, and move on — do not keep probing to "confirm" the pattern.</p>
+
+  <h2>4. Compare across endpoints</h2>
+  <p>One limit in isolation means little. Do the same small handful of manual requests
+  against different endpoints and note which ones enforce limits and which do not —
+  login, password reset, search, static assets. The <em>pattern</em> is the information:</p>
+  <ul>
+    <li>Strict limits on auth endpoints, none on search: the team thought about
+    credential stuffing.</li>
+    <li>Different limits per endpoint: a real rate-limiting layer, not one global bucket.</li>
+    <li>Limits keyed differently per endpoint (IP vs. session vs. account): the defense
+    has layers, and each layer shapes how you pace your manual tests.</li>
+  </ul>
+  <p>This is observation during normal testing, not a measurement campaign. My rule is
+  simple: the moment I suspect a limit, I stop, note it, and test something else. I never
+  run a loop to find the exact threshold. The exact number is almost never the
+  interesting question — the differences between endpoints are.</p>
+
+  <h2>5. Write it in the notebook</h2>
+  <p>Rate-limit observations go straight into the engagement notes the same day they
+  happen. My endpoint inventory has a "limits" column:</p>
+  <pre>endpoint              | limit seen            | headers seen          | date
+/api/v1/login        | 429 after ~10 tries   | retry-after: 60       | 2026-10-15
+/api/v1/search       | none in normal use    | -                     | 2026-10-15</pre>
+  <p>And the dead-end log gets one line: "429 on login at 14:32 — waited for the window,
+  continued with search instead." Two weeks later, that line tells you exactly how to
+  pace the retest. Memory would have said "something about a rate limit, I think."</p>
+
+  <h2>6. What rate limits tell you about the defense</h2>
+  <p>Read as a system description, rate limiting is the target telling you where it
+  expects to be hit:</p>
+  <ul>
+    <li>Limits on auth endpoints suggest the team expects brute-force and credential-stuffing attempts.</li>
+    <li>Standard headers (<code>Retry-After</code>, <code>X-RateLimit-*</code>) suggest a
+    mature stack — off-the-shelf middleware or a deliberate API design.</li>
+    <li>Soft throttling with no headers suggests a WAF or bot-mitigation layer sitting
+    in front of the application.</li>
+    <li>The absence of any limit in normal use means exactly that — nothing more. It is
+    not a finding, it is a gap in your observations, and you treat it as one.</li>
+  </ul>
+  <p>Rate limits are the target describing its own threat model. Read the description,
+  note it with a date, and keep testing like a guest who does not want to be asked
+  to leave.</p>
+
+  <div class="callout">
+    <strong>Disclosure note.</strong> Techniques described here are methodology only.
+    Specific findings from live engagements are reported privately to the vendor first
+    and published here only after remediation or explicit permission.
+  </div>
+
+  <a class="back-link" href="index.html">← all write-ups</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>
