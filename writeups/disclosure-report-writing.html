@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>How to write a disclosure report — D3BUG.REG</title>
+<meta name="description" content="A report structure vendors actually read: summary, impact, reproduction steps, remediation — factual tone, evidence first.">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> cat disclosure-report-writing.md &nbsp;·&nbsp; 2026-10-16 &nbsp;·&nbsp; methodology</p>
+  <h1>How to write a disclosure report</h1>
+
+  <p>Finding a bug is half the work. The other half is getting a vendor to understand
+  it, reproduce it, and fix it — from a report they never asked for. A good report
+  gets triaged the same week. A bad one sits in a queue until it rots. This is the
+  structure I use, and why each section exists.</p>
+
+  <div class="callout">
+    <strong>Scope first.</strong> Everything here assumes written authorization for the
+    target — a program policy you accepted, or an explicit agreement with the vendor.
+    A report about a target you were never allowed to test is not a disclosure,
+    it is a confession.
+  </div>
+
+  <h2>The shape of a report a vendor will read</h2>
+  <p>Triage engineers skim. Give them four sections, in this order, and nothing they
+  have to decode:</p>
+  <ol>
+    <li><strong>Summary</strong> — one paragraph: what the issue is, in plain words.</li>
+    <li><strong>Impact</strong> — what an attacker could concretely do with it. Facts,
+    not movie plots.</li>
+    <li><strong>Reproduction steps</strong> — the exact sequence that produces the
+    behavior, copy-pasteable.</li>
+    <li><strong>Remediation suggestion</strong> — a concrete fix, or at least the
+    direction of one.</li>
+  </ol>
+  <p>Evidence (request/response pairs, screenshots, timestamps) is attached or
+  referenced inline. Keep the report under two pages unless the chain genuinely
+  needs more.</p>
+
+  <h2>Reproduction steps: write for a stranger</h2>
+  <p>The person triaging your report does not have your setup, your cookies, or your
+  memory. Every step must be executable by someone who has never seen the target.
+  I write steps as literal commands with the real requests I sent:</p>
+  <pre>$ curl -s -i "https://target.example.com/api/v1/session/check" \
+  -H "Cookie: session=MY_OWN_TEST_SESSION" \
+  -D check.headers -o check.body
+
+$ cat check.headers
+HTTP/1.1 200 OK
+content-type: application/json
+...
+
+$ python3 -m json.tool check.body</pre>
+  <p>Rules I hold myself to:</p>
+  <ul>
+    <li><strong>Only my own accounts and my own data.</strong> No other user's
+    records, no real customer data, no harvested credentials — redacted or otherwise.</li>
+    <li><strong>State every prerequisite.</strong> "Logged in as my test account"
+    means nothing if the reader does not know how that account was created. Say how.</li>
+    <li><strong>Show the response, not just the request.</strong> A 200 OK with an
+    empty body is a different story than a 200 with data. Paste both sides.</li>
+    <li><strong>One variable changes at a time.</strong> If the report is about what
+    changes between authenticated and unauthenticated, show both requests and both
+    responses side by side.</li>
+  </ul>
+
+  <h2>Evidence is dated notes, not memories</h2>
+  <p>"I remember seeing this on Tuesday" is not evidence. A dated note with the
+  exact command, the timestamp, and the raw response is. During an engagement I
+  keep everything in one folder, in chronological order:</p>
+  <pre>$ ls 2026-10-16/
+01-prelogin-request.txt
+02-prelogin-response.txt
+03-session-check-request.txt
+04-session-check-response.txt
+notes.md</pre>
+  <p>When I write the report, the steps are already there — I am transcribing, not
+  reconstructing. Screenshots get the same treatment: full context visible
+  (URL bar, timestamp), sensitive values redacted before the report leaves my
+  machine, originals kept locally.</p>
+
+  <h2>Impact: state facts, let them score it</h2>
+  <p>The most common failure in reports is severity inflation. "Critical: complete
+  database compromise" for a verbose error message makes the triager distrust the
+  whole report. Describe what you <em>actually demonstrated</em>, with the exact
+  data you touched:</p>
+  <ul>
+    <li>Good: "An unauthenticated request to this endpoint returns the email
+    address of the account passed in the parameter. I confirmed this with two
+    test accounts I created myself."</li>
+    <li>Bad: "This could potentially allow attackers to compromise all users."</li>
+  </ul>
+  <p>If the program uses CVSS, suggest a vector and say it is a suggestion.
+  Never argue severity in the report — a calm, factual impact section does the
+  arguing for you.</p>
+
+  <h2>Tone: professional, patient, disposable</h2>
+  <p>A disclosure report is a cold email to someone who is already busy. No hype,
+  no demands, no countdown ultimatums. State what you found, how to fix it,
+  and that you are available for follow-up questions. If the vendor does not
+  respond, follow the program's policy on timelines — and keep a dated record
+  of every message you sent.</p>
+  <p>One more rule I never break: <strong>do not publish until it is fixed or you
+  have explicit permission.</strong> The write-ups on this blog describe methodology
+  and design thinking. Live findings go to the vendor first, privately, and only
+  appear here after remediation or permission — or never.</p>
+
+  <div class="callout">
+    <strong>Disclosure note.</strong> Specific findings from live engagements are reported
+    privately to the vendor first and published here only after remediation or explicit
+    permission.
+  </div>
+
+  <a class="back-link" href="index.html">← all write-ups</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>
