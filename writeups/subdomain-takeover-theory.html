@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Subdomain takeover: the theory — D3BUG.REG</title>
+<meta name="description" content="What a dangling DNS record is, how to spot one with DNS-only checks, and why you never claim what you find — methodology only.">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> cat subdomain-takeover-theory.md &nbsp;·&nbsp; 2026-10-17 &nbsp;·&nbsp; technique</p>
+  <h1>Subdomain takeover: the theory</h1>
+
+  <p>Some subdomains are promises that were never cancelled. A campaign page was spun
+  up on a third-party host, the campaign ended, the account was closed — but the
+  CNAME record stayed. That leftover pointer is a <em>dangling DNS record</em>, and
+  the theory of subdomain takeover is the theory of those pointers.</p>
+  <p>This post covers how I check for them: DNS-only observation, a human-paced
+  workflow, and a hard line I never cross. No exploitation, no account claims,
+  no target names — the check itself is the whole topic.</p>
+
+  <div class="callout">
+    <strong>Scope first.</strong> Everything below assumes written authorization for the
+    target. No scope, no recon — that rule is non-negotiable in my workflow.
+  </div>
+
+  <h2>1. What "dangling" actually means</h2>
+  <p>A DNS record is an instruction, not a guarantee. A CNAME says: <em>"for this name,
+  go look at that other name instead."</em> It says nothing about who currently
+  controls the destination. When a team stops using the destination — closes the
+  account, deletes the project, lets the trial lapse — the instruction survives
+  anyway. The pointer dangles.</p>
+  <p>The important mental shift: the vulnerability is not in DNS itself. It is in
+  the gap between two facts that DNS lets you observe — <em>this subdomain points
+  at a third-party service</em> and <em>the organization no longer holds that
+  service</em>. The first fact is checkable with pure DNS queries. The second is
+  something you verify carefully and document — never something you test by grabbing
+  the resource yourself.</p>
+
+  <h2>2. Build the subdomain list</h2>
+  <p>Dangling records hide inside the ordinary subdomain list, so the check starts
+  where all my recon starts — Certificate Transparency logs. Same command as always:</p>
+  <pre>curl -s "https://crt.sh/?q=%25.example.com&amp;output=json" \
+  | jq -r '.[].name_value' \
+  | sed 's/\*\.//g' | sort -u &gt; subdomains.txt
+wc -l subdomains.txt</pre>
+  <p>This is a read-only query against a public log. It produces the seed list for
+  everything that follows, and it goes into the engagement folder with today's date.</p>
+
+  <h2>3. Ask DNS what each one points to</h2>
+  <p>The entire check happens at the DNS layer. For each subdomain, the question is
+  simple: <em>does this name resolve to an A record the organization controls, or a
+  CNAME pointing elsewhere?</em> When the local resolver is untrustworthy, I query
+  over HTTPS exactly the way I would for any other recon task:</p>
+  <pre>curl -s "https://cloudflare-dns.com/dns-query?name=sub.example.com&amp;type=CNAME" \
+  -H "accept: application/dns-json" \
+  | jq -r '.Answer[]? | "\(.name) -&gt; \(.data)"'</pre>
+  <p>Across the whole list, a small loop keeps the requests sequential and human-paced:</p>
+  <pre>while read -r sub; do
+  printf '%s : ' "$sub"
+  curl -s "https://cloudflare-dns.com/dns-query?name=${sub}&amp;type=CNAME" \
+    -H "accept: application/dns-json" | jq -r '.Answer[]?.data // "no CNAME"'
+done &lt; subdomains.txt &gt; cname-map.txt</pre>
+  <p>Reading <code>cname-map.txt</code> is the core skill of this check. A CNAME to a
+  name inside the organization's own zone is ordinary delegation. A CNAME pointing at
+  an external hosting platform's hostname — the kind of target you see when a site
+  was once deployed on a third-party service — is a <em>candidate</em> to document.
+  Candidate is a deliberately weak word: a pointer to a third-party service is not a
+  finding. It is a question waiting for authorization and careful verification.</p>
+
+  <h2>4. Compare what the browser sees — passively</h2>
+  <p>DNS tells you where the pointer goes; the rendered page tells you whether
+  anyone is home. One request, read fully, nothing more:</p>
+  <pre>curl -s -D - https://sub.example.com/ -o /tmp/sub-body.html | head -20</pre>
+  <p>Then compare. If the page matches the organization's real content, the delegation
+  is live and the thread ends here. If it matches a generic "nothing is hosted here"
+  page from the platform, the candidate survives one more round of scrutiny — as a
+  documented observation, not as a verdict. Identical versus different responses is
+  the same comparison signal I use everywhere else; here it just has one specific
+  question attached.</p>
+  <p>That single fetch is the limit of my interaction. I never create an account on
+  the platform, never deploy content to the name, never complete a claim — claiming
+  the resource would be acting on the target, which is beyond what a recon check is
+  for, and usually beyond the written scope anyway.</p>
+
+  <h2>5. The hard rules of this check</h2>
+  <p>Theory is only useful if the discipline around it is real. Mine, for dangling
+  records:</p>
+  <ol>
+    <li><strong>DNS only decides.</strong> The CNAME chain is the evidence. Page
+    content is context, not proof.</li>
+    <li><strong>Never claim.</strong> If a record dangles, the finding is reported
+    to the vendor — the reporter's job ends at the report.</li>
+    <li><strong>One request at a time.</strong> Loops stay sequential. This check
+    needs no concurrency and deserves none.</li>
+    <li><strong>Out of scope means stop.</strong> If the candidate sits outside the
+    authorized scope, it goes into the notes as an observation, not a probe.</li>
+  </ol>
+
+  <h2>6. What goes in the notebook</h2>
+  <p>A dangling-record observation that is not written down might as well not exist.
+  My entries follow a fixed format, same day, every time:</p>
+  <pre>[2026-10-17] subdomain check — example.com
+- sub: promo.example.com
+- CNAME chain: promo.example.com -&gt; legacy-campaign.hostingprovider.net
+- resolver: DoH via cloudflare-dns.com
+- page: generic provider "no site here" response (single passive GET)
+- decision: candidate, in scope —&gt; reported to vendor, no further action</pre>
+  <p>That note is the deliverable. It contains the evidence, the method, and the
+  explicit decision — everything a vendor needs to verify the observation
+  independently, and everything that proves the check never crossed the line.</p>
+
+  <div class="callout">
+    <strong>Disclosure note.</strong> Techniques described here are methodology only.
+    Specific findings from live engagements are reported privately to the vendor first
+    and published here only after remediation or explicit permission.
+  </div>
+
+  <a class="back-link" href="index.html">← all write-ups</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>
