@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Secrets in git history: a researcher's view — D3BUG.REG</title>
+<meta name="description" content="Exposed .env files and old commits leak credentials long after the file was deleted — audit git history with log -S, git grep across revisions, and rotate what you find.">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> cat git-history-hygiene.md &nbsp;·&nbsp; 2026-10-18 &nbsp;·&nbsp; technique</p>
+  <h1>Secrets in git history: a researcher's view</h1>
+
+  <p>Every researcher has a moment where <code>git log</code> turns up something that
+  should never have been committed. A <code>.env</code> file with a production API key.
+  An old commit adding <code>config.py</code> with a database password. The file was
+  deleted two commits later — and the secret is still sitting in history, readable by
+  anyone who can reach the repository. Git is append-only by design: a committed secret
+  stays committed until history itself is rewritten. Here is how I audit a repository's
+  history for leaked secrets, using only git — on my own repos, or on repos I am
+  authorized to assess.</p>
+
+  <div class="callout">
+    <strong>Scope first.</strong> This is audit methodology. It applies to repos you own
+    or repos you are authorized to assess. Reading public history is reading public
+    information — mining it for credentials to use is not research. If you find a live
+    secret belonging to someone else, the move is disclosure, not use.
+  </div>
+
+  <h2>1. Why deleting the file is not enough</h2>
+  <p><code>git rm .env</code> removes the file from the working tree and from future
+  commits. It does nothing to the commits that already contain it. Any version of the
+  file is one command away:</p>
+  <pre>git show 9f3a2b1:.env</pre>
+  <p>Forks, CI logs, clones on old laptops, and archive mirrors keep copies you will
+  never reach. That is the first rule of secret hygiene: once a credential touches git
+  history, assume it is compromised and <strong>rotate it</strong>. Rewriting history
+  is cleanup; rotation is the fix.</p>
+
+  <h2>2. What to look for</h2>
+  <p>Filenames first — they are the cheapest signal:</p>
+  <pre>.env, .env.local, .env.production
+config.json, settings.py, .npmrc, .pypirc
+credentials.json, *.pem, id_rsa, .aws/credentials
+.git-credentials, docker-compose.yml with inline passwords</pre>
+  <p>Then content patterns — strings that look like secrets:</p>
+  <pre>API_KEY, api_secret, password =
+BEGIN RSA PRIVATE KEY, BEGIN OPENSSH PRIVATE KEY
+ghp_, sk_live_, AKIA
+mongodb://user:pass@, postgres://user:pass@</pre>
+
+  <h2>3. Searching history with git</h2>
+  <p>Git ships everything you need to audit history. My sequence:</p>
+  <pre>$ git log --oneline --all | head -30      # get the lay of the land
+$ git log --all --full-history -- ".env"   # which commits ever touched .env?
+$ git show 9f3a2b1:.env                    # inspect the file as of that commit</pre>
+  <p>Then the pickaxe — <code>-S</code> finds commits that added or removed a string,
+  <code>-G</code> does the same with a regex:</p>
+  <pre>$ git log -p -S "API_KEY" --all            # commits that added/removed this string
+$ git log -p -G "password\s*=" --all        # commits matching this pattern</pre>
+  <p>And for content that <code>log</code> might miss, <code>git grep</code> across
+  every revision at once:</p>
+  <pre>$ git grep "BEGIN RSA PRIVATE KEY" $(git rev-list --all)   # every commit, one search</pre>
+  <p>These commands are the audit. They tell you what leaked and when — they do not
+  fix anything. The fix is always rotation first.</p>
+
+  <h2>4. The researcher's angle</h2>
+  <p>During an authorized engagement, a client's public GitHub presence is part of the
+  attack surface: public repos, gists, old forks, archived projects — all of them
+  carry history. The workflow is the same one I run on my own repos: enumerate the
+  public repositories, fetch them, and run these searches locally.</p>
+  <p>What goes in the engagement notes: the exact commit hash, the file, the line.
+  Dated, factual, minimal. The secret itself is never used to log in anywhere, never
+  pasted into chat, never left in a note unredacted. Then it goes to the owner with
+  rotation steps, like any other finding — reported privately, published here only
+  after remediation or permission.</p>
+
+  <h2>5. Prevention is a five-second habit</h2>
+  <p>Keep secrets in environment variables or a secret manager, never in files that
+  could be committed. <code>.gitignore</code> the obvious entries:</p>
+  <pre>*.env
+*.pem
+id_rsa*
+.aws/
+.git-credentials</pre>
+  <p>And audit before every push — <code>git status</code> and
+  <code>git diff --cached</code> take five seconds and have saved me more than once.
+  I once had to revoke a token after it touched a repo. Rotation took minutes; the
+  lesson stuck: the audit happens <em>before</em> the push, not after.</p>
+
+  <h2>What this gives you</h2>
+  <p>A repo you can hand to anyone — contractor, contributor, auditor — without
+  worrying about what is buried in its history. Audit your own repos the same way you
+  would audit a client's: systematically, with dates, and with the fix (rotation)
+  already decided before you start searching.</p>
+
+  <div class="callout">
+    <strong>Disclosure note.</strong> If an audit turns up a live credential belonging
+    to a third party, report it to the owner first — privately, with rotation steps —
+    and publish nothing until it is remediated or the owner agrees.
+  </div>
+
+  <a class="back-link" href="index.html">← all write-ups</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>
