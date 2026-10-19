@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hardware debugging notes: UART on ESP32 — D3BUG.REG</title>
+<meta name="description" content="Finding UART pins, sweeping baud rates, and reading ESP32 boot logs with arduino-cli and screen — the hardware side of the lab.">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> cat esp32-uart-debugging.md &nbsp;·&nbsp; 2026-10-19 &nbsp;·&nbsp; tooling</p>
+  <h1>Hardware debugging notes: UART on ESP32</h1>
+
+  <p>Most of my notes here are about web recon, but the lab has a hardware side too:
+  Arduino, ESP8266, ESP32 boards wired to sensors and servos. When hardware misbehaves,
+  the single most useful diagnostic is also the simplest — the serial console. UART is
+  the <code>curl</code> of embedded work: one channel, plain text, and it tells you
+  exactly what the device thinks it is doing.</p>
+
+  <div class="callout">
+    <strong>Scope first.</strong> Everything here is my own hardware — boards I own,
+    firmware I wrote or flashed myself. The same rules as the rest of this blog apply:
+    no scope, no recon.
+  </div>
+
+  <h2>1. Know what UART is, physically</h2>
+  <p>UART is asynchronous serial: two data wires, TX (transmit) and RX (receive), plus
+  a shared ground. TX of one side goes to RX of the other — never TX to TX. No clock
+  wire, so both sides must agree on the baud rate or the output is garbage. On an ESP32
+  devkit the USB port already includes a serial adapter wired to the chip's hardware
+  UART0, so you get a console for free the moment you plug the board in.</p>
+
+  <h2>2. Find the pins on an unknown board</h2>
+  <p>Checklist, in order:</p>
+  <ol>
+    <li><strong>Schematic or silkscreen.</strong> Labels like TX, RX, or UART are the
+    fastest win.</li>
+    <li><strong>Idle voltage.</strong> An idle UART TX pin sits HIGH — 3.3 V on ESP32-class
+    logic. Probe candidate pins with a multimeter while the device boots: a pin parked
+    at 3.3 V that twitches when the device starts talking is TX.</li>
+    <li><strong>Common ground first.</strong> Connect GND before any data wire. Half of
+    all "UART is broken" sessions are just two circuits floating at different
+    references.</li>
+    <li><strong>Cross the data wires.</strong> Your adapter's RX goes to the device's TX
+    and back. Never connect a 5 V TX to a 3.3 V RX without a level shifter.</li>
+  </ol>
+
+  <h2>3. Sweep the baud rate</h2>
+  <p>The classic symptom of a wrong baud rate is garbage: rows of
+  <code>⸮⸮⸮⸮</code> where text should be. Garbage means the wiring is probably right
+  and the timing is wrong — that is progress. The ESP32 boot ROM always speaks 115200,
+  so a freshly reset board prints its boot header at 115200 no matter what the app
+  later switches to. My sweep order:</p>
+  <pre>115200    # ESP32 / ESP8266 app and boot ROM default
+9600      # sensors, GPS modules, classic peripherals
+57600     # older firmware defaults
+74880     # ESP8266 boot ROM oddity
+460800    # fast flash/debug links</pre>
+  <p>Method: open the monitor at one rate, reset the board, and watch.
+  Readable header means the right rate. Identical garbage on every reset means the
+  rate is wrong but the wiring is good — move to the next rate. Different random
+  garbage each time points back at the wiring.</p>
+
+  <h2>4. Open the serial monitor</h2>
+  <p>First, find the device node. On Linux a CP210x or CH340 USB-serial adapter shows up
+  as <code>/dev/ttyUSB0</code>:</p>
+  <pre>$ dmesg | tail -5
+usb 1-2: cp210x converter now attached to ttyUSB0</pre>
+  <p>Then open the monitor at the firmware's baud rate. <code>arduino-cli</code> covers
+  both upload and monitoring without a GUI:</p>
+  <pre>$ arduino-cli monitor -p /dev/ttyUSB0 -c baudrate=115200</pre>
+  <p>If <code>arduino-cli</code> is not handy, <code>screen</code> does the same job
+  and is on almost every system:</p>
+  <pre>$ screen /dev/ttyUSB0 115200
+# detach with: Ctrl-a, then k, then y</pre>
+  <p>One port, one process: if the monitor fails with "device busy", something else is
+  holding the port — a previous monitor session, a browser tab with Web Serial, or an
+  upload in progress.</p>
+
+  <h2>5. Read the boot log</h2>
+  <p>Reset the board while the monitor is open. A healthy ESP32 prints something like:</p>
+  <pre>rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)
+configsip: 0, SPIWP:0xee
+clk_drv:0x00,q_drv:0x00,d_drv:0x00,cs0_drv:0x00,hd_drv:0x00,wp_drv:0x00
+mode:DIO, clock div:2
+load:0x3fff0030,len:4544
+entry 0x400806b4</pre>
+  <p>This header is the hardware's own status report. <code>rst</code> tells you why the
+  chip restarted (power-on, software reset, watchdog, brownout). A boot entry showing
+  download mode instead of <code>SPI_FAST_FLASH_BOOT</code> means the
+  <code>GPIO0</code> strapping pin was held low and the chip is waiting for an upload
+  instead of running your firmware — which explains an otherwise "dead" board. Read
+  the first five lines before touching anything else; they answer most "it won't
+  start" questions.</p>
+  <p>Note that the application can switch baud rates after boot: the boot header stays
+  readable at 115200, but if the sketch uses a different rate its own output turns to
+  garbage. When the header is clean but the rest is noise, match the app's configured
+  rate — check the <code>Serial.begin()</code> call.</p>
+
+  <h2>6. Common traps, from my logbook</h2>
+  <ul>
+    <li><strong>Garbage only after boot:</strong> wrong app baud rate — check the
+    <code>Serial.begin()</code> call.</li>
+    <li><strong>Nothing at all, port opens fine:</strong> TX/RX swapped, or the firmware
+    never calls <code>Serial.begin()</code>.</li>
+    <li><strong>Board resets in a loop:</strong> read the <code>rst</code> reason on
+    each boot; watchdog and brownout resets repeat with a visible pattern.</li>
+    <li><strong>Upload fails but the monitor works:</strong> GPIO0 strapping — hold the
+    BOOT button while starting the upload, release once flashing begins.</li>
+  </ul>
+
+  <p>The serial console is the cheapest observability a board gives you: one USB cable,
+  the right baud rate, and the habit of reading the first five lines before changing
+  anything. Same discipline as web recon — and like web recon, the winning move is
+  writing it down. The baud rate that worked, the pins actually wired, the boot log's
+  <code>rst</code> reason: all in the dated lab notes, the same day.</p>
+
+  <div class="callout">
+    <strong>Disclosure note.</strong> Techniques described here are methodology only.
+    Specific findings from live engagements are reported privately to the vendor first
+    and published here only after remediation or explicit permission.
+  </div>
+
+  <a class="back-link" href="index.html">← all write-ups</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>
