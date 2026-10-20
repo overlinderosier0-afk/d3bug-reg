@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Reading ESP32 boot logs: rst codes and invalid headers — D3BUG.REG</title>
+<meta name="description" content="What the ROM bootloader prints at power-on: reset codes, invalid-header errors, and what they reveal about flash contents — read at 115200 baud.">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> cat esp32-boot-logs.md &nbsp;·&nbsp; 2026-10-20 &nbsp;·&nbsp; tooling</p>
+  <h1>Reading ESP32 boot logs: rst codes and invalid headers</h1>
+
+  <p>The ROM bootloader talks before your firmware does. Every ESP32 prints its
+  boot sequence on the serial console at power-on, and that block of text is the
+  fastest diagnostic you have. It tells you why the board reset, what it found
+  (or failed to find) in flash, and exactly where the flash layout disagrees
+  with what you think you wrote. Here is how to read it.</p>
+
+  <div class="callout">
+    <strong>Scope first.</strong> Everything here assumes written authorization for the
+    target. No scope, no recon.
+  </div>
+
+  <h2>1. Open the console at 115200 baud</h2>
+  <p>The boot ROM always speaks at 115200 baud. Find your port and attach
+  before powering the board — the log starts the instant it resets:</p>
+  <pre>$ ls /dev/ttyUSB* /dev/ttyACM*
+/dev/ttyUSB0
+$ screen /dev/ttyUSB0 115200</pre>
+  <p>If the output is garbled characters instead of readable lines, you are
+  almost certainly at the wrong baud rate. The ESP32 boot ROM uses 115200;
+  your firmware may switch to something else later, but the first lines are
+  always 115200. Save the session output to a file — boot logs scroll past
+  fast and you will want to re-read them.</p>
+
+  <h2>2. Anatomy of a normal boot</h2>
+  <p>A healthy boot looks like this:</p>
+  <pre>rst:0x1 (POWERON),boot:0x13 (SPI_FAST_FLASH_BOOT)
+configsip: 0, SPIWP:0xee
+clk_drv:0x00,q_drv:0x00,d_drv:0x00,cs0_drv:0x00,hd_drv:0x00,wp_drv:0x00
+mode:DIO, clock div:1
+load:0x3fff0030,len:4832
+load:0x40078000,len:16460
+load:0x40080400,len:4
+entry 0x400805e4</pre>
+  <p>The <code>load:</code> lines are the second-stage bootloader copying
+  firmware segments into RAM; <code>entry</code> is the address it jumps to.
+  If your log stops before <code>entry</code>, the problem is in the image
+  itself. If it stops <em>after</em> it, your firmware is the problem.</p>
+
+  <h2>3. The rst: code — why did it reset?</h2>
+  <p>The first token, <code>rst:0x1</code>, is the reset reason register. These
+  are the ones I look up most:</p>
+  <pre>0x01  POWERON_RESET         - power applied, normal
+0x03  SW_RESET              - software reset (esp_restart)
+0x05  DEEPSLEEP_RESET       - woke from deep sleep
+0x07  TG0WDT_SYS_RESET      - timer group watchdog fired
+0x09  RTCWDT_SYS_RESET      - RTC watchdog fired
+0x0C  SW_CPU_RESET          - CPU reset from software
+0x0F  RTCWDT_BROWN_OUT_RESET - brownout: voltage dipped</pre>
+  <p>A loop of <code>0x07</code> or <code>0x09</code> resets means the watchdog
+  is killing your firmware before it finishes its first task — check blocking
+  loops and long busy-waits. A loop of <code>0x0F</code> brownouts during
+  motor or servo movement is a power supply problem, not a code problem.</p>
+
+  <h2>4. "invalid header: 0x..." — the most useful failure</h2>
+  <p>This line appears when the ROM bootloader cannot find a valid image where
+  it expects one:</p>
+  <pre>invalid header: 0xffffffff</pre>
+  <p>It is worth unpacking, because it names the actual bytes at the flash
+  address the bootloader read. The ROM expects the second-stage bootloader at
+  flash offset <code>0x1000</code>, and the first byte of that image must be
+  the magic byte <code>0xe9</code>. So:</p>
+  <ul>
+    <li><code>0xffffffff</code> means the bytes at <code>0x1000</code> are all
+    erased flash. The most common cause: you flashed the application binary at
+    the wrong address, so nothing landed where the bootloader lives.</li>
+    <li>An application image has magic <code>0xe9</code> too — but it belongs
+    at <code>0x10000</code>, not at <code>0x1000</code>. Flash an app binary at
+    offset zero and the ROM reads garbage where it expects its bootloader.</li>
+  </ul>
+  <p>Verify the suspicion without guessing — read the header back and look at
+  the first byte:</p>
+  <pre>$ esptool.py --chip esp32 --port /dev/ttyUSB0 read_flash 0x1000 4 hdr.bin
+$ xxd hdr.bin
+00000000: e900 0000                             ....</pre>
+  <p>First byte <code>e9</code> at <code>0x1000</code>: bootloader is present.
+  All <code>ff</code>: erased flash, reflash the full image set. The standard
+  ESP32 flash layout is: bootloader at <code>0x1000</code>, partition table at
+  <code>0x8000</code>, <code>boot_app0</code> at <code>0xe000</code>, and the
+  application at <code>0x10000</code>. Writing the app image at
+  <code>0x0</code> guarantees an <code>invalid header</code> — the single
+  most common "board is dead" mistake I have seen.</p>
+
+  <h2>5. "waiting for download" — the ROM gave up on flash entirely</h2>
+  <p>Sometimes the log ends with the chip sitting idle instead of looping on
+  <code>invalid header</code>. This means the ROM entered download mode: it is
+  waiting for a new firmware upload. That happens when the EN/RESET line is
+  held low together with the BOOT strapping pin pulled low, or when the board
+  was designed to enter download mode on failed boot. If you see this and you
+  did not ask for it, check your reset circuitry and the BOOT button before
+  suspecting the firmware.</p>
+
+  <h2>6. Capture every session</h2>
+  <p>Boot logs are ephemeral — reset the board and they are gone. My bring-up
+  routine: console attached and logged to a dated file <em>before</em> the
+  first power-on, wrong baud rates fixed immediately, and the
+  <code>rst:</code> code and any <code>invalid header</code> value written into
+  the dated notes with the exact flash command that produced them. A dead
+  board and a saved boot log is a ten-minute problem; a dead board and no log
+  is an afternoon.</p>
+
+  <div class="callout">
+    <strong>Disclosure note.</strong> Specific findings from live engagements are reported
+    privately to the vendor first and published here only after remediation or explicit
+    permission.
+  </div>
+
+  <a class="back-link" href="index.html">← all write-ups</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>
