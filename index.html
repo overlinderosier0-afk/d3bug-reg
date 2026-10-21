@@ -29,6 +29,12 @@
   <section>
     <h2 class="section-title">Latest write-ups</h2>
     <div class="cards">
+      <a class="card" href="writeups/esp32-flash-layout.html">
+        <span class="card-tag">tooling</span>
+        <h3>ESP32 flash layout: where each binary goes</h3>
+        <p>Bootloader at 0x1000, partitions at 0x8000, boot_app0 at 0xE000, app at 0x10000 — flash an app image at 0x0 and all you get is "invalid header".</p>
+        <span class="card-date">2026-10-21</span>
+      </a>
       <a class="card" href="writeups/esp32-boot-logs.html">
         <span class="card-tag">tooling</span>
         <h3>Reading ESP32 boot logs: rst codes and invalid headers</h3>
@@ -58,12 +64,6 @@
         <h3>How to write a disclosure report</h3>
         <p>A report structure vendors actually read: summary, impact, reproduction steps, remediation — factual tone, evidence first.</p>
         <span class="card-date">2026-10-16</span>
-      </a>
-      <a class="card" href="writeups/rate-limit-observation.html">
-        <span class="card-tag">technique</span>
-        <h3>Observing rate limits without tripping them</h3>
-        <p>429s, Retry-After headers, and soft throttling — notice rate limiting during normal manual testing and read what it says about the defenses.</p>
-        <span class="card-date">2026-10-15</span>
       </a>
     </div>
   </section>

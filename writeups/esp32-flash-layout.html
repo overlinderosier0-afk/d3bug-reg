@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ESP32 flash layout: where each binary goes — D3BUG.REG</title>
+<meta name="description" content="Bootloader at 0x1000, partitions at 0x8000, boot_app0 at 0xE000, app at 0x10000 — flash an app image at 0x0 and all you get is 'invalid header'.">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> cat esp32-flash-layout.md &nbsp;·&nbsp; 2026-10-21 &nbsp;·&nbsp; tooling</p>
+  <h1>ESP32 flash layout: where each binary goes</h1>
+
+  <p>Every <code>invalid header: 0x...</code> error has a backstory. On ESP32, most of
+  those backstories are really about one number: the flash offset where a binary was
+  written. The ROM bootloader expects each piece of firmware at an exact address, and
+  it does not negotiate. Put the app image at the wrong offset and the board either
+  prints garbage or reboots in a loop — not because the firmware is broken, but
+  because nothing is where the boot process goes looking for it. This is the map.</p>
+
+  <div class="callout">
+    <strong>Scope first.</strong> This covers your own hardware and hardware you have
+    permission to work on. No scope, no probing — that rule applies to benches, not
+    just networks.
+  </div>
+
+  <h2>The four addresses that matter</h2>
+  <p>A standard ESP-IDF-style flash image is four binaries at four fixed offsets:</p>
+  <pre>0x1000   second-stage bootloader   (loaded by the ROM bootloader)
+0x8000   partition table           (where every flash region is defined)
+0xE000   boot_app0                 (wakeup + RF calibration stub)
+0x10000  app firmware              (your program)</pre>
+  <p>The boot sequence is mechanical: the ROM code burned into the chip loads the
+  bootloader from <code>0x1000</code>. The bootloader reads the partition table at
+  <code>0x8000</code>, finds the factory app region, and jumps to the app at
+  <code>0x10000</code>. Miss any step — corrupt header, missing partition entry,
+  app at the wrong offset — and the chain stops right there, loudly.</p>
+
+  <h2>Why flashing an app image at 0x0 fails</h2>
+  <p>Release binaries are almost always <em>app images</em>: their first byte is the
+  magic byte <code>0xE9</code>. You can confirm this without booting anything:</p>
+  <pre>$ xxd firmware.bin | head -1
+00000000: e9d5 0a3c 4008 8d32 0000 0c00 0000 0000  ...&lt;@..2........</pre>
+  <p>If that file is written at offset <code>0x0</code>, the ROM bootloader wakes up,
+  checks address <code>0x0</code> for a bootloader image header, finds app image
+  magic instead, and reports <code>invalid header</code>. The firmware is fine; the
+  address was wrong. Offset <code>0x0</code> is never the right home for an app image —
+  that space belongs to the bootloader's header format, not to <code>0xE9</code>.</p>
+  <p>This is the single most common reason a freshly flashed board prints an error and
+  does nothing else. Before suspecting the hardware, the wiring, or the USB adapter,
+  check where you wrote the file.</p>
+
+  <h2>Writing a complete image with esptool</h2>
+  <p>When you have the four pieces, write them in one command so nothing is forgotten.
+  Offsets first, filenames after — each pair is one write:</p>
+  <pre>$ esptool.py --chip esp32 --port /dev/ttyUSB0 --baud 921600 \
+    --before default_reset --after hard_reset write_flash -z \
+    --flash_mode dio --flash_freq 40m --flash_size detect \
+    0x1000 bootloader_dio_40m.bin \
+    0x8000 partitions.bin \
+    0xe000 boot_app0.bin \
+    0x10000 firmware.bin</pre>
+  <p>The flags worth remembering: <code>--flash_size detect</code> probes the actual
+  chip instead of trusting a config file, and <code>-z</code> compresses the transfer
+  so a full write takes seconds instead of minutes. If the board does not enter
+  download mode automatically, hold BOOT while pressing EN once.</p>
+
+  <h2>Start from a clean chip</h2>
+  <p>Switching between firmware builds or partition schemes leaves stale data behind.
+  When nothing adds up, erase everything and reflash from zero:</p>
+  <pre>$ esptool.py --chip esp32 --port /dev/ttyUSB0 erase_flash</pre>
+  <p>Erase is especially important when a previous flash had a different partition
+  table: an old <code>0x8000</code> entry pointing at a region the new app does not
+  fill will mislead the bootloader even if all four new binaries are written
+  correctly.</p>
+
+  <h2>Verify what you actually wrote</h2>
+  <p>Do not trust the write log alone — read the region back and check the magic byte
+  at the offset where the bootloader will look for it:</p>
+  <pre>$ esptool.py --chip esp32 --port /dev/ttyUSB0 \
+    read_flash 0x10000 0x100 app_head.bin
+$ xxd app_head.bin | head -1
+00000000: e9d5 0a3c 4008 8d32 0000 0c00 0000 0000  ...&lt;@..2........</pre>
+  <p>If the first byte at <code>0x10000</code> is <code>0xE9</code>, the app landed
+  where the bootloader expects it. If it is <code>0xFF</code>, the write did not
+  happen at that address. This two-minute read-back has saved me more debugging
+  sessions than any oscilloscope.</p>
+
+  <h2>The mental checklist</h2>
+  <ol>
+    <li>App image (<code>0xE9</code> at byte 0) always goes to <code>0x10000</code>, never <code>0x0</code>.</li>
+    <li>Bootloader, partition table, and boot_app0 travel with the app — flash all four together.</li>
+    <li>Changing partition schemes? <code>erase_flash</code> first, then write.</li>
+    <li>When the board prints <code>invalid header</code>, verify the offset before touching anything else.</li>
+  </ol>
+  <p>The ESP32 boot process is unforgiving but completely deterministic. Learn the four
+  addresses and half of all flashing failures turn into a one-line fix.</p>
+
+  <div class="callout">
+    <strong>Disclosure note.</strong> Specific findings from live engagements are reported
+    privately to the vendor first and published here only after remediation or explicit
+    permission.
+  </div>
+
+  <a class="back-link" href="index.html">← all write-ups</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>
