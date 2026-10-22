@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>When esptool says the port is busy — D3BUG.REG</title>
+<meta name="description" content="Errno 16 means the device file is already open: your own serial monitor, Chrome Web Serial, or Linux's ModemManager and brltty. A five-minute checklist to get the port back.">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> cat esptool-port-busy.md &nbsp;·&nbsp; 2026-10-22 &nbsp;·&nbsp; tooling</p>
+  <h1>When esptool says the port is busy</h1>
+
+  <p>Every flashing session eventually hits it. You run esptool, and instead of a
+  progress bar you get:</p>
+  <pre>$ esptool.py --chip esp32 --port /dev/ttyUSB0 flash_id
+...
+could not open port '/dev/ttyUSB0': [Errno 16] Device or resource busy</pre>
+  <p><code>Errno 16</code> is the kernel telling you the truth: the device file is
+  already open somewhere. The board is fine, the cable is fine, the firmware is
+  fine — the port is simply taken. Serial ports are exclusive by design: one
+  holder at a time. The fix is always the same workflow — find the holder, release
+  the port, flash. This is the checklist I run, in order.</p>
+
+  <div class="callout">
+    <strong>Scope first.</strong> This covers your own hardware and hardware you have
+    permission to work on. No scope, no probing — that rule applies to benches, not
+    just networks.
+  </div>
+
+  <h2>1. The holder is usually you</h2>
+  <p>Before blaming the system, check the obvious: a serial monitor in another
+  terminal, a second esptool process, an Arduino IDE serial monitor, a PlatformIO
+  device monitor, an <code>arduino-cli monitor</code> you forgot to close. Any
+  process with the device open blocks everyone else. This is the most common cause
+  and the most embarrassing one — find the process first:</p>
+  <pre>$ fuser /dev/ttyUSB0
+/dev/ttyUSB0:          4213
+$ ps -p 4213 -o pid,comm,args
+  PID COMMAND ARGS
+ 4213 python   python -m serial.tools.miniterm /dev/ttyUSB0 115200</pre>
+  <p>Miniterm still running in a background terminal — close it and retry.
+  <code>lsof</code> gives the same answer with more detail:</p>
+  <pre>$ lsof /dev/ttyUSB0
+COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME
+python   4213 user    4u   CHR  188,0      0t0 1162 /dev/ttyUSB0</pre>
+
+  <h2>2. The holder is your browser</h2>
+  <p>Chrome's Web Serial API keeps the port open as long as the tab lives. If you
+  used esptool-web, Wokwi, or any browser-based flasher recently, the grant may
+  still hold <code>/dev/ttyUSB0</code> even though nothing looks "open". There is
+  no visible terminal to kill — close the tab, or kill the browser, and the port
+  comes back. This one burns people repeatedly precisely because the holder is
+  invisible from the terminal.</p>
+
+  <h2>3. The holder is your OS (Linux edition)</h2>
+  <p>On Linux, two services compete with you for every USB serial device. The first
+  is <code>ModemManager</code>: it probes newly attached serial devices to detect
+  modems. That probe briefly opens the port — and sometimes wedges it. Check what
+  it thinks about your board:</p>
+  <pre>$ mmcli -L
+    /org/freedesktop/ModemManager1/Modem/0 (ttyUSB0) [probing]</pre>
+  <p>If ModemManager is holding the port, <code>sudo mmcli -r</code> resets it. For
+  a permanent fix on a bench machine you will never use as a dial-up modem, mask
+  the service so it stops probing entirely:</p>
+  <pre>$ sudo systemctl mask ModemManager
+$ sudo systemctl stop ModemManager</pre>
+  <p>The second is <code>brltty</code> — the Braille display service, which claims
+  USB serial devices it believes are Braille terminals. That includes many ESP32
+  dev boards. If the device misbehaves on a fresh plug, look at the kernel log:</p>
+  <pre>$ dmesg | tail -5
+[  123.4] usb 1-2: Product: CP2102 USB to UART Bridge Controller
+[  123.5] brltty[612]: USB: device claimed by brltty</pre>
+  <p>Fix: <code>sudo apt purge brltty</code> if you do not use a Braille display,
+  or exclude the board's VID:PID in <code>brltty.conf</code>.</p>
+
+  <h2>4. Permissions are not "busy" — but they look like it</h2>
+  <p>A permission error is a different errno (<code>Errno 13</code>), but a port
+  owned by <code>root:dialout</code> with your user missing from the group fails
+  before the busy question even arises — and it reads just as opaque. Rule it
+  out:</p>
+  <pre>$ ls -l /dev/ttyUSB0
+crw-rw---- 1 root dialout 188, 0 Oct 22 10:15 /dev/ttyUSB0
+$ groups | grep -o dialout
+dialout</pre>
+  <p>No <code>dialout</code> in the output? Add yourself and log out and back in:</p>
+  <pre>$ sudo usermod -aG dialout $USER</pre>
+  <p>Until then, every denial will look like a dead board.</p>
+
+  <h2>5. The five-minute checklist</h2>
+  <p>Ordered, because order matters:</p>
+  <ol>
+    <li>Close every serial monitor, second esptool, and browser tab with a Web Serial grant.</li>
+    <li><code>fuser /dev/ttyUSB0</code> (or <code>lsof /dev/ttyUSB0</code>) — kill the holder if you own it.</li>
+    <li>Unplug, wait two seconds, replug. Then <code>dmesg | tail</code> to confirm the device re-enumerated as the <em>same</em> node — it may come back as <code>ttyUSB1</code>.</li>
+    <li>Check <code>ls -l</code> and your <code>dialout</code> membership.</li>
+    <li>If it is still busy on a fresh plug: ModemManager probing or brltty. Mask or purge as appropriate.</li>
+  </ol>
+  <p>A smoke test that the port is genuinely free before relaunching esptool:</p>
+  <pre>$ python3 -c "import serial; s = serial.Serial('/dev/ttyUSB0', 115200, timeout=1); s.close(); print('port free')"
+port free</pre>
+
+  <h2>Closing</h2>
+  <p>"Device or resource busy" is never the board and never the firmware. It is
+  always a lock held by something else: your own monitor, your browser, or your
+  distribution's serial-hungry services. Work the list top to bottom and the port
+  comes back — no reboot, no new cable, no sacrifice.</p>
+
+  <div class="callout">
+    <strong>Disclosure note.</strong> Specific findings from live engagements are reported
+    privately to the vendor first and published here only after remediation or explicit
+    permission.
+  </div>
+
+  <a class="back-link" href="index.html">← all write-ups</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>
