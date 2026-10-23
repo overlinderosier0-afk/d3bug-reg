@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sensor silent? Scan the I2C bus first — D3BUG.REG</title>
+<meta name="description" content="Your OLED is black and the sensor returns nothing. Before touching a line of code, run the I2C scanner: confirm the address, the wiring, and the pull-ups in five minutes.">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> cat i2c-scan-first.md &nbsp;·&nbsp; 2026-10-23 &nbsp;·&nbsp; tooling</p>
+  <h1>Sensor silent? Scan the I2C bus first</h1>
+
+  <p>Every silent peripheral ends in the same place: you, staring at code that
+  probably does not contain the bug. The OLED stays black, the sensor returns
+  nothing, and the instinct is to rewrite the driver, swap the library, or
+  re-read the wiring diagram for the fifth time. Don't. The cheapest experiment
+  on the bench takes five minutes and answers the only question that matters
+  first: <strong>is anything even on the bus?</strong></p>
+
+  <div class="callout">
+    <strong>Scope first.</strong> This covers your own hardware and hardware you
+    have permission to work on. No scope, no probing — that rule applies to
+    benches, not just networks.
+  </div>
+
+  <h2>1. The scanner sketch</h2>
+  <p>On the ESP32, the default I2C pins are GPIO21 for SDA and GPIO22 for SCL —
+  a bare <code>Wire.begin()</code> uses them. The scanner probes every address
+  from 1 to 126 and reports which ones acknowledge. It is the same sketch the
+  Arduino community has passed around for a decade, because it works:</p>
+  <pre>#include &lt;Wire.h&gt;
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin();  // SDA=GPIO21, SCL=GPIO22 on ESP32
+  Serial.println("Scanning I2C bus...");
+}
+
+void loop() {
+  int found = 0;
+  for (uint8_t addr = 1; addr &lt; 127; addr++) {
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() == 0) {
+      Serial.print("Found device at 0x");
+      Serial.println(addr, HEX);
+      found++;
+    }
+  }
+  Serial.print(found);
+  Serial.println(" device(s) found.");
+  delay(5000);
+}</pre>
+  <p>Flash it, open the serial monitor at 115200 baud, and read the output. There
+  are two possible outcomes, and both are answers.</p>
+
+  <h2>2. An address appears — the address is the contract</h2>
+  <p>If the scanner reports a device, write the address down and compare it with
+  what your library expects. The usual suspects on a bench:</p>
+  <pre>SSD1306 OLED        0x3C or 0x3D   (SA0 pin / solder pad selects)
+MPU6050 / DS3231    0x68
+BMP280 / BME280     0x76 or 0x77
+PCF8574 LCD pack    0x27 or 0x3F</pre>
+  <p>The classic trap is <code>0x3C</code> vs <code>0x3D</code>: two
+  "identical" OLED boards, one solder pad different, two different addresses.
+  The Adafruit SSD1306 constructor takes the address explicitly, so the fix is
+  one constant — not the wiring, not the library:</p>
+  <pre>#include &lt;Adafruit_SSD1306.h&gt;
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &amp;Wire, -1);
+
+// in setup():
+if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {  // use the FOUND address
+  Serial.println("SSD1306 allocation failed");
+  for (;;);
+}</pre>
+  <p>If the scanner found <code>0x3D</code> and the code passes
+  <code>0x3C</code>, <code>begin()</code> fails and the screen stays black. This
+  is the single most common "dead OLED" cause I have seen, and it is never
+  found by reading the driver source — only by asking the bus who is there.</p>
+
+  <h2>3. No devices found — work the list, in order</h2>
+  <p>An empty scan is not a dead end; it is a narrowing. Check in this order:</p>
+  <ol>
+    <li><strong>Wrong pins.</strong> <code>Wire.begin()</code> with no arguments
+    assumes GPIO21/GPIO22 on the ESP32. If you wired SDA and SCL to other pins,
+    call <code>Wire.begin(sdaPin, sclPin)</code> explicitly — a swapped SDA/SCL
+    pair answers to nothing.</li>
+    <li><strong>Power and ground.</strong> Is the module getting the voltage it
+    expects (3.3V, or 5V if it is a 5V module)? And is its ground actually
+    shared with the ESP32's ground? A module powered from a separate rail with
+    a floating ground cannot answer anything.</li>
+    <li><strong>Pull-ups.</strong> I2C requires pull-up resistors on SDA and
+    SCL. With one or two devices on short wires, the ESP32's internal pull-ups
+    are usually enough, and most ready-made modules already include them. But
+    some bare sensor boards do not — if the bus is flaky rather than dead, add
+    external 4.7k resistors from SDA and SCL to 3.3V.</li>
+    <li><strong>Monitor baud.</strong> The scanner prints at 115200. A monitor
+    left at 9600 shows garbage, which reads as silence. Match the baud before
+    concluding anything.</li>
+    <li><strong>The module itself.</strong> Pins, power, common ground,
+    pull-ups, and baud all verified, and the bus is still empty? The module is
+    now the suspect — not the code.</li>
+  </ol>
+
+  <h2>Closing</h2>
+  <p>The I2C scanner is not a tool of last resort; it is the first thing you
+  run. It costs five minutes and splits the problem space in half: if something
+  answers, the bug is in the address or the library call; if nothing answers,
+  the bug is in the pins, the power, or the module. Only after the scan comes
+  back clean — address confirmed, library fed the right constant — does the
+  application code deserve any suspicion. Scan first, blame the code last.</p>
+
+  <div class="callout">
+    <strong>Disclosure note.</strong> Specific findings from live engagements are reported
+    privately to the vendor first and published here only after remediation or explicit
+    permission.
+  </div>
+
+  <a class="back-link" href="index.html">← all write-ups</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>
