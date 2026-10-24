@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ESP32 ADC2 goes blind when WiFi starts — D3BUG.REG</title>
+<meta name="description" content="The ESP32's ADC2 unit is claimed by the WiFi driver, so analog reads on its pins return garbage once WiFi starts — put joysticks and sensors on ADC1 pins 32–39.">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> cat article.md &nbsp;·&nbsp; 2026-10-24 &nbsp;·&nbsp; tooling</p>
+  <h1>ESP32 ADC2 goes blind when WiFi starts</h1>
+
+  <p>Here is a bug that looks like broken hardware: a joystick axis reads perfectly
+  on the bench, you add <code>WiFi.begin()</code> to the sketch, and the readings
+  collapse to zero — or to 4095 — and never come back. The wiring did not change.
+  The sensor did not change. The only change is that WiFi is now running.
+  That is not a coincidence, and it is not a defective board. It is the ESP32's
+  ADC2 unit being claimed by the WiFi driver.</p>
+
+  <div class="callout">
+    <strong>Scope first.</strong> Everything here assumes written authorization for the
+    target. No scope, no recon.
+  </div>
+
+  <h2>Two ADC units, one shared with WiFi</h2>
+  <p>The classic ESP32 has two analog-to-digital converter units, and the pins are
+  split between them in a way that is easy to miss on a pinout diagram:</p>
+  <ul>
+    <li><strong>ADC1</strong> — 8 channels, GPIO 32, 33, 34, 35, 36, 37, 38, 39.
+    Always available to your code.</li>
+    <li><strong>ADC2</strong> — 10 channels, GPIO 0, 2, 4, 12, 13, 14, 15, 25, 26, 27.
+    Shared with the WiFi driver.</li>
+  </ul>
+  <p>When WiFi starts, the driver takes over ADC2 for its own internal calibration
+  work. From that moment on, <code>analogRead()</code> on any ADC2 pin returns
+  garbage — typically a stuck 0 or a stuck 4095 — regardless of the actual voltage
+  on the pin. Before WiFi starts, the same pin reads fine, which is exactly why
+  this bug is so confusing: the code worked five minutes ago.</p>
+  <p>This is documented behavior, not a workaround for a broken chip. It applies to
+  the original ESP32. (The ESP32-S2 and later parts handle ADC2 differently, so
+  check the datasheet for your exact chip — but if you are on a classic ESP32,
+  the rule below holds.)</p>
+
+  <h2>Reproduce it in two minutes</h2>
+  <p>The fastest way to convince yourself is a sketch that reads one ADC2 pin —
+  GPIO 25, say — before and after WiFi connects, and prints both values:</p>
+  <pre>#include &lt;WiFi.h&gt;
+
+void setup() {
+  Serial.begin(115200);
+  Serial.print("Before WiFi: ");
+  Serial.println(analogRead(25));
+  WiFi.begin("ssid", "password");
+  delay(2000);
+  Serial.print("After WiFi:  ");
+  Serial.println(analogRead(25));
+}
+
+void loop() {}</pre>
+  <p>Compile and upload it with the Arduino CLI, then watch the serial output:</p>
+  <pre>$ arduino-cli compile --fqbn esp32:esp32:esp32 adc2-demo
+$ arduino-cli upload -p /dev/ttyUSB0 --fqbn esp32:esp32:esp32 adc2-demo
+$ arduino-cli monitor -p /dev/ttyUSB0 -c baudrate=115200
+Before WiFi: 1873
+After WiFi:  0</pre>
+  <p>The first reading is a real analog value. The second is the WiFi driver
+  telling you, in effect, that the pin is no longer yours. If you see this exact
+  pattern — good readings, then a stuck value the moment WiFi comes up — stop
+  debugging the sensor. The sensor is innocent.</p>
+
+  <h2>The fix: move to ADC1</h2>
+  <p>The fix is a wiring change, not a code change. Move every analog input to an
+  ADC1 pin: GPIO 32 through 39. A joystick is the classic case — its two axes
+  land on GPIO 34 and 35, both ADC1, and they keep reading correctly with WiFi
+  running, a web server up, or anything else the radio is doing.</p>
+  <p>After rewiring, re-run the same test against the new pin. The before/after
+  comparison is the whole verification: if the reading stays sane with WiFi
+  connected, the move fixed it. If it is still stuck, you have a different
+  problem — wiring, a floating pin, or a dead sensor — and the I2C-scanner
+  instinct applies here too: verify the hardware layer before blaming the code.</p>
+  <p>One more ADC1 detail worth knowing: GPIO 34 to 39 are input-only pins. They
+  have no internal pull-up or pull-down resistors, so a floating input on those
+  pins will drift. That is a separate, normal analog behavior — tie the pin to a
+  real signal and it reads fine.</p>
+
+  <h2>What if ADC1 is full?</h2>
+  <p>Eight ADC1 channels cover most small builds, but if you genuinely run out,
+  you have three honest options. First, read the ADC2 sensor <em>before</em>
+  WiFi starts and cache the value, if a one-time reading is enough. Second, stop
+  WiFi, take the reading, and restart it — ugly, but it works for slow,
+  occasional measurements. Third, add an external ADC such as an ADS1115 over
+  I2C: it is a separate chip, the WiFi driver cannot touch it, and it gives you
+  four more channels with better resolution than the ESP32's built-in ADC anyway.
+  What does not work is hoping ADC2 will behave once WiFi is up. It will not.</p>
+
+  <h2>The rule of thumb</h2>
+  <p>When you lay out an ESP32 board that will ever use WiFi, treat GPIO 32–39 as
+  your analog pins and everything else as digital until proven otherwise. Write
+  it on the schematic, in the pinout comment at the top of the sketch, wherever
+  future-you will see it before wiring a sensor to GPIO 25. The five minutes
+  this rule costs up front are nothing next to the afternoon you will spend
+  chasing a "broken" joystick that was never broken — it was just wired to the
+  wrong half of the chip.</p>
+
+  <div class="callout">
+    <strong>Disclosure note.</strong> Specific findings from live engagements are reported
+    privately to the vendor first and published here only after remediation or explicit
+    permission.
+  </div>
+
+  <a class="back-link" href="index.html">← all write-ups</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>
