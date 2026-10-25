@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Servos need their own power supply — D3BUG.REG</title>
+<meta name="description" content="An ESP32 that resets every time a servo moves is usually not a code bug: the servo is dragging the shared 5V rail down. Give servos their own supply, join the grounds, and the resets stop.">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> cat article.md &nbsp;·&nbsp; 2026-10-25 &nbsp;·&nbsp; tooling</p>
+  <h1>Servos need their own power supply</h1>
+
+  <p>The symptom looks like a software bug. The sketch uploads fine, the ESP32
+  boots, the serial output flows — and the moment a servo starts moving, the
+  board resets. Sometimes it resets once and recovers. Sometimes it resets in
+  a loop, twitching the servo a few degrees on every boot. What changed is
+  the load on the power rail: a servo is a motor, and motors do not sip
+  current politely.</p>
+
+  <div class="callout">
+    <strong>Scope first.</strong> Everything here assumes written authorization for the
+    target. No scope, no recon.
+  </div>
+
+  <h2>Why the shared rail fails</h2>
+  <p>A small hobby servo such as an SG90 draws little current at rest, a few
+  hundred milliamps while moving freely, and roughly 650&nbsp;mA at stall —
+  when it starts moving, changes direction, or pushes against a load. An
+  MG90S is in the same ballpark, and the numbers add up fast with two or
+  three servos on one robot head or arm. The 5V pin of a typical ESP32
+  development board cannot deliver that: it is fed, directly or through an
+  on-board regulator, from a USB port usually limited to about
+  500&nbsp;mA.</p>
+  <p>So the servo starts, the current demand spikes, the rail voltage sags,
+  and the ESP32's brownout detector trips. The chip resets, the servo loses
+  its signal, the rail recovers, the board boots again — and the cycle
+  repeats. The subtler symptom is no reset at all, but a servo that jitters,
+  hums, or stops short of its commanded angle, because the voltage is just
+  low enough to starve the motor without tripping the detector. Either way,
+  do not debug the sketch first. It is almost certainly fine.</p>
+
+  <h2>Recognize it before you rewire anything</h2>
+  <p>The fastest diagnostic is the serial monitor. A brownout reset announces
+  itself in the boot log, and the pattern — normal output, then a sudden
+  reset exactly when the servo moves — is the signature:</p>
+  <pre>$ arduino-cli monitor -p /dev/ttyUSB0 -c baudrate=115200
+Moving servo to 90 degrees...
+Brownout detector was triggered
+rst:0x10 (RTCWDT_RTC_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)
+ets Jul 29 2019 12:21:46</pre>
+  <p>Two more checks confirm it without any instruments. First, disconnect the
+  servo's power wire and run the sketch again: if the board stops resetting,
+  the servo load was the cause, not the code. Second, move the servo by hand
+  (power off) and feel for resistance — a jammed horn or a servo fighting
+  its end-stop draws stall current continuously. If you have a multimeter,
+  watch the 5V rail while the servo moves: a dip of a volt or more under
+  load is all the proof you need.</p>
+
+  <h2>The fix: a separate supply, one common ground</h2>
+  <p>Power the servos from their own 5V supply — a 5V 2A wall adapter, a UBEC,
+  or a battery pack rated for the load — and power the ESP32 from USB as
+  usual. The servo's red wire goes to the servo supply's positive terminal,
+  the brown or black wire to its negative terminal, and only the orange or
+  yellow signal wire goes to the ESP32 GPIO. Then join the two grounds: a
+  wire from the servo supply's negative terminal to an ESP32 GND pin. That
+  last wire is not optional. Without a common ground, the signal wire has no
+  reference voltage, and the servo will ignore commands or jitter randomly
+  even though both supplies are healthy.</p>
+  <p>A large electrolytic capacitor across the servo supply rails — 470&nbsp;µF
+  to 1000&nbsp;µF, mind the polarity — helps absorb brief current spikes when
+  a servo starts moving. It is a supplement, not a substitute: it cannot
+  rescue an undersized supply, but it smooths the edges on a correctly sized
+  one. Keep the servo power leads short and reasonably thick, too; thin
+  jumper wires add resistance exactly where a spike hurts most.</p>
+
+  <h2>Size the supply for stall, not for idle</h2>
+  <p>Budget with stall currents, because servos hit them every time they
+  start, reverse, or stall against a load. A rough rule: one SG90 or MG90S
+  needs about 1&nbsp;A of headroom, so a single servo wants a 5V 1A supply
+  at minimum, two servos want 2A, and a four-servo arm wants 3A or more. If
+  the supply is only rated for the running current, the first simultaneous
+  move of two servos will drag the rail down again and the servos will
+  stutter. When in doubt, go one size up.</p>
+
+  <h2>Verify it the same way it failed</h2>
+  <p>After rewiring, run the exact motion that used to reset the board — a
+  full sweep from one end-stop to the other, ideally with all servos moving
+  together — and watch the serial monitor:</p>
+  <pre>#include &lt;ESP32Servo.h&gt;
+
+Servo myServo;
+
+void setup() {
+  Serial.begin(115200);
+  myServo.attach(13);
+}
+
+void loop() {
+  myServo.write(35);
+  delay(1000);
+  myServo.write(145);
+  delay(1000);
+}</pre>
+  <p>If the board stays up through repeated sweeps, the serial output keeps
+  flowing, and the servo reaches both ends of its travel without jitter,
+  the fix held. If it still resets, check the two mistakes that survive
+  this fix most often: the grounds are not actually joined, or the servo
+  supply itself is undersized. Servos are motors. Feed them like motors,
+  and the microcontroller gets to do its own job in peace.</p>
+
+  <div class="callout">
+    <strong>Disclosure note.</strong> Specific findings from live engagements are reported
+    privately to the vendor first and published here only after remediation or explicit
+    permission.
+  </div>
+
+  <a class="back-link" href="index.html">← all write-ups</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>

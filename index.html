@@ -29,6 +29,12 @@
   <section>
     <h2 class="section-title">Latest write-ups</h2>
     <div class="cards">
+      <a class="card" href="writeups/servo-power-brownout.html">
+        <span class="card-tag">tooling</span>
+        <h3>Servos need their own power supply</h3>
+        <p>An ESP32 that resets every time a servo moves is usually not a code bug: the servo is dragging the shared 5V rail down. Give servos their own supply, join the grounds, and the resets stop.</p>
+        <span class="card-date">2026-10-25</span>
+      </a>
       <a class="card" href="writeups/esp32-adc-vs-wifi.html">
         <span class="card-tag">tooling</span>
         <h3>ESP32 ADC2 goes blind when WiFi starts</h3>
@@ -58,12 +64,6 @@
         <h3>Reading ESP32 boot logs: rst codes and invalid headers</h3>
         <p>What the ROM bootloader prints at power-on: reset codes, invalid-header errors, and what they reveal about flash contents — read at 115200 baud.</p>
         <span class="card-date">2026-10-20</span>
-      </a>
-      <a class="card" href="writeups/esp32-uart-debugging.html">
-        <span class="card-tag">tooling</span>
-        <h3>Hardware debugging notes: UART on ESP32</h3>
-        <p>Finding UART pins, sweeping baud rates, and reading ESP32 boot logs — the serial console as the cheapest observability a board gives you.</p>
-        <span class="card-date">2026-10-19</span>
       </a>
     </div>
   </section>
