@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Writing your first useful Semgrep rules — D3BUG.REG</title>
+<meta name="description" content="From a grep pattern to a tested Semgrep rule: test-driven rule writing, taint mode for dataflow bugs, and how to keep a custom ruleset honest.">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> cat semgrep-first-rules.md &nbsp;·&nbsp; 2026-10-26 &nbsp;·&nbsp; tooling</p>
+  <h1>Writing your first useful Semgrep rules</h1>
+
+  <p>Most code review starts the same way: you grep for a dangerous pattern,
+  fix what matters, and then forget the pattern. A month later it is back
+  in a new file. A Semgrep rule is that grep pattern, written down properly
+  and with tests, so it keeps working after you have forgotten it. This
+  post covers the smallest useful version of that workflow: one pattern,
+  one rule, tests first, and taint mode when a plain pattern is not enough.</p>
+
+  <div class="callout">
+    <strong>Scope first.</strong> Everything here assumes written authorization for the
+    target. No scope, no recon — and no running custom detection rules against
+    code you are not authorized to review.
+  </div>
+
+  <h2>1. Start from a pattern you already grep for</h2>
+  <p>Do not start by inventing a rule. Start from a search you have already
+  run by hand during a review. A good first candidate has a clear shape
+  and a clear fix. If you cannot explain in one sentence why the pattern
+  is bad and what the fix is, it is not ready to become a rule yet.</p>
+  <p>Write the pattern down as code, not as prose. Semgrep patterns look
+  like the code they match, with metavariables where the details vary:</p>
+  <pre>rules:
+  - id: shell-from-variable
+    languages: [python]
+    severity: WARNING
+    message: Shell command built from a variable. Prefer a list
+      of arguments and avoid shell=True.
+    pattern: subprocess.call($CMD, shell=True)</pre>
+  <p>That rule is deliberately narrow. A narrow rule that fires ten times
+  and is right ten times beats a clever rule that fires a hundred times
+  and is right twice. Noise is what kills a ruleset: once reviewers start
+  ignoring findings, the ruleset is dead even if the rules are good.</p>
+
+  <h2>2. Tests first, always</h2>
+  <p>Every rule gets two test cases before it gets used: one that should
+  match, and one that should not. A test file carries comments marking
+  expected findings, and the test runner checks the rule against them:</p>
+  <pre># ruleid: shell-from-variable
+subprocess.call(user_input, shell=True)
+
+# ok: shell-from-variable
+subprocess.call(["ls", "-l"], shell=False)</pre>
+  <p>Run the tests before you trust the rule:</p>
+  <pre>semgrep --test rules/
+semgrep --config rules/shell-from-variable.yaml src/</pre>
+  <p>If the first command is not green, the rule is not done. The fixed
+  case matters as much as the vulnerable case: a rule that flags fixed
+  code trains everyone to ignore it. Keep the test files next to the
+  rules and run them whenever a rule changes — a rule edit without a
+  test run is how a working rule quietly stops matching its pattern.</p>
+
+  <h2>3. Run it against a real codebase, then read every hit</h2>
+  <p>Once the tests pass, run the rule against a real codebase you are
+  authorized to review, and read every hit before judging the rule:</p>
+  <pre>semgrep --config rules/ --error --quiet src/
+semgrep --config rules/shell-from-variable.yaml --json src/ | jq '.results | length'</pre>
+  <p>If every hit is real, the rule is done. If some hits are false
+  positives, narrow the pattern: add a condition or require an extra
+  argument. If the rule finds nothing anywhere, check that it matches
+  your test case at all before concluding the codebase is clean — a
+  rule that cannot fire is worse than no rule, because it looks like
+  coverage. Record each decision in your notes, dated, like any other
+  review finding.</p>
+
+  <h2>4. When a pattern is not enough: taint mode</h2>
+  <p>Some bugs are not a single call. They are a flow: untrusted data
+  enters at one place and reaches a dangerous sink without being cleaned
+  up. A plain pattern only sees one line at a time, so it cannot see
+  that journey. That is what taint mode is for: a taint rule names
+  sources, sinks, and sanitizers.</p>
+  <pre>rules:
+  - id: tainted-shell-command
+    languages: [python]
+    severity: ERROR
+    message: Untrusted input reaches a shell command.
+    mode: taint
+    pattern-sources:
+      - pattern: input(...)
+    pattern-sinks:
+      - pattern: subprocess.call(..., shell=True)
+    pattern-sanitizers:
+      - pattern: shlex.quote(...)</pre>
+  <p>Read that rule as a sentence: data from a source that reaches a
+  sink without passing through a sanitizer is a finding. If the code
+  quotes the input first, the flow is sanitized and the rule stays
+  quiet. One accurate flow rule teaches you more than ten pattern
+  rules, because it follows the data instead of guessing from a line.
+  Test the clean, tainted, and sanitized flows separately — a taint
+  rule tested only on the tainted case will surprise you on the first
+  real codebase it meets.</p>
+
+  <h2>5. Keep the ruleset honest</h2>
+  <p>A ruleset rots like any other document. Review it on a schedule,
+  not when it breaks. Drop rules that no longer fire, fix messages
+  that no longer explain the fix, and delete rules everyone ignores —
+  a deleted rule is better than an ignored one, because an ignored
+  rule teaches reviewers that findings are optional. Keep each rule
+  small, its message actionable, and its severity honest: ERROR means
+  something must change, WARNING means something deserves a look.</p>
+  <p>The goal is not a large ruleset. It is a small set of rules you
+  actually run, whose findings you actually read, and whose tests
+  actually pass. Start with one rule, tested on both sides, run
+  against real code. Then add a second one — one honest rule at a time.</p>
+
+  <div class="callout">
+    <strong>Disclosure note.</strong> Techniques described here are methodology only.
+    Specific findings from live engagements are reported privately to the vendor first
+    and published here only after remediation or explicit permission.
+  </div>
+
+  <a class="back-link" href="index.html">← all write-ups</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>
