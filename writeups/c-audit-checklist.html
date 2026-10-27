@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>A C code review checklist — D3BUG.REG</title>
+<meta name="description" content="A systematic pass order for reviewing C and C++ code: inputs, buffers, integers, memory lifetime, and dangerous APIs — one question per pass.">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> cat c-audit-checklist.md &nbsp;·&nbsp; 2026-10-27 &nbsp;·&nbsp; technique</p>
+  <h1>A C code review checklist</h1>
+
+  <p>C gives the reviewer no safety net: no bounds checker, no garbage
+  collector, no runtime to catch a bad assumption before it becomes a crash.
+  That is why a C review should never be a single skim. I review in passes,
+  one bug class at a time, in the same order every time. Each pass asks one
+  question, and a file is not done until every pass has answered it.</p>
+
+  <div class="callout">
+    <strong>Scope first.</strong> Everything here assumes written authorization for the
+    target. No scope, no recon.
+  </div>
+
+  <h2>1. Map the inputs before reading the logic</h2>
+  <p>Start with the surface, not the algorithm: every place untrusted data
+  enters — command-line arguments, files, network reads, environment
+  variables, any value crossing a trust boundary. Note which functions
+  receive that data and how far it travels before validation.</p>
+  <pre>grep -rn "argv\|getenv\|fread\|recv\|read(" --include="*.c" .
+grep -rn "int main\|parse_\|handle_" --include="*.c" --include="*.h" .</pre>
+  <p>For each input, write down where it comes from, what type and size it
+  is expected to be, and where it is first checked. If any of the three is
+  unclear, that is the first review note: an open question to resolve
+  before judging the code around it.</p>
+
+  <h2>2. Buffers: who sets the length, and who checks it?</h2>
+  <p>For every copy, ask where the destination size comes from and where the
+  source length comes from. The dangerous pattern is not one function name;
+  it is a copy whose length is assumed rather than derived from the
+  destination. Check the unbounded classics first, then the bounded ones:
+  a bounded call with a wrong bound is just as broken:</p>
+  <pre>grep -rn "strcpy\|strcat\|sprintf\|gets(" --include="*.c" .
+grep -rn "strncpy\|strncat\|snprintf\|memcpy\|memmove" --include="*.c" .</pre>
+  <p>On the bounded calls, verify three details: the size argument really is
+  the destination size, the return value is checked where it matters
+  (<code>snprintf</code> reports truncation instead of failing), and the result
+  is NUL-terminated on every path. Watch the off-by-one: a buffer of size
+  <code>N</code> holds <code>N - 1</code> characters plus the terminator, and a
+  loop running to <code>&lt;= N</code> has already gone too far.</p>
+
+  <h2>3. Integers: check the arithmetic, not just the value</h2>
+  <p>Integer bugs hide in the arithmetic done <em>before</em> a check. A length
+  validated after it has been multiplied, added, or cast can wrap around
+  and pass a check it should have failed. Review every size calculation
+  feeding an allocation or a copy: a count multiplied by an element size,
+  a header length added on, any conversion between signed and unsigned
+  types. For each one, ask: can this computation overflow before the result
+  is used, and is the check placed before that computation? Prefer
+  <code>size_t</code> for sizes, keep signed and unsigned values apart in
+  comparisons, and treat any narrowing cast as needing an explicit range
+  check first.</p>
+
+  <h2>4. Memory lifetime: who owns it, and when does it die?</h2>
+  <p>For every allocation, trace the lifetime: who allocates it, who frees it,
+  and whether any pointer survives the free. The recurring classes are
+  use-after-free, double-free, freeing a pointer that was never allocated,
+  and returning the address of a stack variable. Trace ownership across
+  function boundaries, because that is where it breaks — a function that
+  frees memory its caller still uses, or a caller that frees memory already
+  freed on an error path. Error paths deserve the same attention as the
+  happy path: a function that allocates three buffers and frees only two
+  when the third allocation fails leaks on exactly the path nobody tested.</p>
+  <pre>grep -rn "malloc\|calloc\|realloc\|free(" --include="*.c" .
+# for each free(): is the pointer used again? is it freed twice?</pre>
+  <p>When a pointer is stored in a struct or a global, note who owns it next
+  to the declaration. Ownership written down there is the cheapest defence
+  against a lifetime bug three hundred lines later.</p>
+
+  <h2>5. Dangerous APIs and format strings</h2>
+  <p>Finish with the calls that turn a logic bug into something worse: a
+  format string from input, a shell command built by concatenating
+  untrusted text, a file path assembled from user input. All are the same
+  problem: data reaching a place where it is interpreted as instructions.</p>
+  <pre>grep -rn "printf\|fprintf\|sprintf\|snprintf" --include="*.c" .
+grep -rn "system(\|popen(\|execl\|execv" --include="*.c" .</pre>
+  <p>Every format call should have a literal format string, with input passed
+  as arguments. Every shell or process call should be questioned even when
+  the input looks trusted — trusted today is not trusted after the next
+  refactor.</p>
+
+  <h2>6. One pass, one question — then verify</h2>
+  <p>Run the passes in this order — inputs, buffers, integers, lifetime,
+  dangerous APIs — and take notes per pass, not per file. A note should
+  record the file and line, the question that raised it, and what would
+  have to be true for it to be safe. That last part matters: most notes
+  collapse on re-reading because the reviewer never wrote down the
+  assumption. Before calling a pass finished, let the compiler help:</p>
+  <pre>gcc -Wall -Wextra -Wshadow -fanalyzer -c file.c -o /dev/null
+# read every warning; a warning you cannot explain is a review note</pre>
+  <p>Compiler warnings are not findings, and a clean build is not a clean
+  bill of health. They are a second pair of eyes on the passes you just
+  made.</p>
+
+  <h2>What the checklist buys you</h2>
+  <p>A checklist does not make a review exhaustive. It makes it repeatable:
+  the same questions, in the same order, on every file, so the bug class
+  you would have skipped on a tired afternoon gets checked anyway. Review
+  slowly, write the assumption down, and let the passes decide when a file
+  is done.</p>
+
+  <div class="callout">
+    <strong>Disclosure note.</strong> Specific findings from live engagements are reported
+    privately to the vendor first and published here only after remediation or explicit
+    permission.
+  </div>
+
+  <a class="back-link" href="index.html">← all write-ups</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>
