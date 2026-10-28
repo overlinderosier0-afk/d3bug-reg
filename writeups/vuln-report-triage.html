@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Triaging a vulnerability report in 15 minutes — D3BUG.REG</title>
+<meta name="description" content="Reproduce, check scope and impact, weigh the evidence — then investigate, reject with a written reason, or ask for more proof.">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> cat vuln-report-triage.md &nbsp;·&nbsp; 2026-10-28 &nbsp;·&nbsp; methodology</p>
+  <h1>Triaging a vulnerability report in 15 minutes</h1>
+
+  <p>A report arrives, and the first instinct is to believe it or dismiss it.
+  Both are mistakes. Triage is a short, written decision about whether a report
+  earns more time, and why. Fifteen minutes is enough when the questions are
+  fixed in advance: investigate, reject, or ask for the missing evidence.</p>
+
+  <div class="callout">
+    <strong>Scope first.</strong> Everything here assumes written authorization for the
+    target, and that any reproduction happens inside that scope, at a human pace.
+    No scope, no reproduction — that rule is non-negotiable in my workflow.
+  </div>
+
+  <h2>Minutes 0–2: extract the threat model</h2>
+  <p>Read the report once and write one sentence: an attacker with a stated
+  capability can take a stated action to obtain a stated impact. If that
+  sentence cannot be written, the report is not ready to judge. Vague claims
+  are not a threat model. The sentence forces the report to name who attacks,
+  with what access, and what changes for the victim.</p>
+  <p>Two checks belong in these first minutes. First, is the claimed capability
+  smaller than the claimed impact? If the attacker already needs the very access
+  the flaw would supposedly grant, the report is redundant. Second, is the
+  behavior reachable in real use — called from real code, enabled by real
+  configuration — or only in theory? A path no real deployment exercises is a
+  code smell, not a finding.</p>
+
+  <h2>Minutes 2–7: reproduce, or mark it unreproduced</h2>
+  <p>Open a dated triage note first. The note is the deliverable:</p>
+  <pre>mkdir -p triage
+cat &gt; triage/report-id.md &lt;&lt;'EOF'
+# Triage — report-id
+- Claim:
+- Threat model:
+- Reproduction tried:
+- Verdict:
+EOF</pre>
+  <p>Then try the reporter's steps exactly as written, once, at a human pace, on
+  an authorized target, reading each response. If a step is missing or
+  ambiguous, stop and write that down instead of improvising a different attack
+  — improvisation turns triage into new research, which has no fifteen-minute
+  budget.</p>
+  <p>A reproduction that produces the claimed behavior is evidence. One that
+  produces nothing is also evidence — of a gap, not of safety. Record exactly
+  what was tried, including inputs and responses observed, so anyone can repeat
+  the attempt and get the same result.</p>
+
+  <h2>Minutes 7–10: scope and impact, in that order</h2>
+  <p>Scope first: does the affected component fall inside the written
+  authorization? A real flaw outside scope is noted, set aside, and handled
+  through the proper channel — not triaged into an investigation. Impact
+  second: what does the attacker gain, and who is harmed? Rank it by the
+  concrete outcome — data exposed, actions performed as another user, state
+  changed without authorization — not by the severity label on the report. A
+  CVE number or CVSS score proves nothing on its own. And ask whether the
+  behavior is standard or documented: correct implementation of a specification,
+  or explicitly documented behavior with security warnings, is not a
+  vulnerability of that component.</p>
+
+  <h2>Minutes 10–13: weigh the evidence, list the gaps</h2>
+  <p>By now the report has either survived or it has not. Answer each remaining
+  question in the note:</p>
+  <ol>
+    <li>Is the threat model complete — attacker, capability, path, impact?</li>
+    <li>Does the attacker gain something they did not already have?</li>
+    <li>Is the path reachable in real deployments, not just in theory?</li>
+    <li>Is the behavior a deviation from the standard or the documentation, rather than a correct implementation of either?</li>
+    <li>Would fixing it cost more — in risk, disruption, or ecosystem impact — than the flaw itself? If so, the severity drops.</li>
+  </ol>
+  <p>The burden of proof sits with the reporter. It is not the triager's job to
+  prove a claim unexploitable. When evidence is missing, name the exact evidence
+  that would close the gap: a reproduction step, a log line, a configuration
+  detail. "More details, please" helps nobody; a precise list does.</p>
+
+  <h2>Minutes 13–15: decide, and write the decision down</h2>
+  <p>There are only three outcomes. <strong>Investigate</strong> when the report
+  survives every check: escalate it, build a proper proof of concept, and write
+  the finding. <strong>Reject</strong> when a check fails: close it with the
+  precise reason written in the note, so the same report does not come back
+  unchanged. <strong>Request evidence</strong> when a check cannot be judged:
+  send back only the list of missing proof. A rejected report with a documented
+  justification is worth more than a false positive in a deliverable.</p>
+  <p>Watch for the two classic errors. Rejecting a valid report for a bad
+  reason — "only local access" is a real threat model in multi-tenant and
+  containerized deployments. And accepting an invalid report for a bad reason —
+  a CVE exists, the score is high, or fixing it "just in case" feels safer.
+  The first buries real risk; the second spends the vendor's trust.</p>
+
+  <h2>Why the timer matters</h2>
+  <p>Fifteen minutes is not about speed. It is about forcing the decision to be
+  small, written, and checkable. A report that needs more than fifteen minutes
+  has already earned its investigation — that is the point of the timer. A
+  report that cannot survive fifteen minutes of fixed questions has told you
+  everything you need to know, and the note proves it.</p>
+
+  <div class="callout">
+    <strong>Disclosure note.</strong> Techniques described here are methodology only.
+    Specific findings from live engagements are reported privately to the vendor first
+    and published here only after remediation or explicit permission. No real
+    report is quoted or described in this post.
+  </div>
+
+  <a class="back-link" href="index.html">← all write-ups</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>
