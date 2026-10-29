@@ -29,6 +29,12 @@
   <section>
     <h2 class="section-title">Latest write-ups</h2>
     <div class="cards">
+      <a class="card" href="writeups/js-bundle-endpoints.html">
+        <span class="card-tag">technique</span>
+        <h3>Harvesting endpoints from JavaScript bundles</h3>
+        <p>Collect the bundles an application ships to the browser, grep them for API paths, and build an endpoint inventory before sending a single probe.</p>
+        <span class="card-date">2026-10-29</span>
+      </a>
       <a class="card" href="writeups/vuln-report-triage.html">
         <span class="card-tag">methodology</span>
         <h3>Triaging a vulnerability report in 15 minutes</h3>
@@ -58,12 +64,6 @@
         <h3>ESP32 ADC2 goes blind when WiFi starts</h3>
         <p>The WiFi driver claims ADC2, so analog reads on its pins return garbage once WiFi is up — move joysticks and sensors to ADC1 pins 32–39.</p>
         <span class="card-date">2026-10-24</span>
-      </a>
-      <a class="card" href="writeups/i2c-scan-first.html">
-        <span class="card-tag">tooling</span>
-        <h3>Sensor silent? Scan the I2C bus first</h3>
-        <p>Your OLED is black and the code looks fine. Before blaming it, run the I2C scanner: confirm the address (0x3C vs 0x3D is the usual suspect), the wiring, and the pull-ups in five minutes.</p>
-        <span class="card-date">2026-10-23</span>
       </a>
     </div>
   </section>

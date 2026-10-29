@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Harvesting endpoints from JavaScript bundles — D3BUG.REG</title>
+<meta name="description" content="Collect the JavaScript bundles an authorized application ships to the browser, grep them for API paths, and build an endpoint inventory before sending a single probe.">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> cat js-bundle-endpoints.md &nbsp;·&nbsp; 2026-10-29 &nbsp;·&nbsp; technique</p>
+  <h1>Harvesting endpoints from JavaScript bundles</h1>
+
+  <p>Before I probe an application, I read what it already tells the browser.
+  A modern front end ships its routing, its API calls, and much of its auth logic
+  as JavaScript bundles. Collecting those bundles and grepping them gives me an
+  endpoint inventory before I send a single request to an API path. This post
+  covers collection and extraction only. A string in a bundle is a lead, not a
+  finding, and no conclusion about any endpoint follows from this step alone.</p>
+
+  <div class="callout">
+    <strong>Scope first.</strong> Everything below assumes written authorization for the
+    target. No scope, no recon — that rule is non-negotiable in my workflow.
+  </div>
+
+  <h2>1. Collect the bundles served by the application</h2>
+  <p>I start from a page the application serves in scope, fetch its HTML, and
+  extract the script references. The filenames are usually hashed, which is
+  useful: a hash tells me when a deploy has replaced a bundle and my copy
+  is stale.</p>
+  <pre>mkdir -p bundles
+curl -s https://target.example.com/ \
+  | grep -oE 'src="[^"]+\.js[^"]*"' \
+  | sed 's/src="//;s/"//' | sort -u &gt; bundles.txt
+cat bundles.txt</pre>
+  <p>Relative paths need the origin put back on; absolute URLs need a scope check
+  first. I download only bundles served by a host that is in scope, and skip
+  third-party scripts — analytics and widgets belong to someone else's scope
+  and add noise without adding application routes.</p>
+  <pre>while IFS= read -r bundle; do
+  curl -s -o "bundles/$(basename "$bundle")" \
+    "https://target.example.com$bundle"
+done &lt; bundles.txt
+ls -l bundles/</pre>
+  <p>Lazy-loaded chunks are the gap in this first pass: a bundle loaded only
+  after a click or a login never appears in the first page's HTML. I re-collect
+  after each in-scope page I visit, and keep every collection in its own dated
+  folder so an old bundle never masquerades as the current build.</p>
+
+  <h2>2. Grep for paths before reading any file</h2>
+  <p>With the bundles on disk, I do not open them yet. I search for structure
+  across all of them at once and write the results to files I can sort:</p>
+  <pre>grep -rhoE '"/api/[^"]+"' bundles/*.js | sort -u &gt; endpoints.txt
+grep -rhoE "'/api/[^']+'" bundles/*.js | sort -u &gt;&gt; endpoints.txt
+grep -rhoE '"/(auth|graphql|v1|v2)/[^"]*"' bundles/*.js | sort -u
+wc -l endpoints.txt; head -n 40 endpoints.txt</pre>
+  <p>The <code>-h</code> flag drops filenames, <code>-o</code> prints only the
+  match, and <code>sort -u</code> turns hundreds of repeated references into
+  one line per path. A path in five bundles is still one inventory entry.</p>
+  <p>Next I widen the search to the words around API calls:</p>
+  <pre>grep -rhoE '"https?://[^"]+"' bundles/*.js | sort -u
+grep -rhoE '(redirect_uri|client_id|grant_type|refresh_token|prelogin)[^",]{0,40}' bundles/*.js | sort -u
+grep -rhoE '"(GET|POST|PUT|PATCH|DELETE)"' bundles/*.js | sort | uniq -c | sort -nr</pre>
+  <p>Absolute URLs reveal other hosts the front end talks to. Each one gets the
+  same scope question as a bundle URL: if it is out of scope, it goes in the
+  notes as out of scope, not in the inventory.</p>
+
+  <h2>3. Separate application routes from framework noise</h2>
+  <p>Most of a bundle is not the application. Framework code, libraries, and
+  shared chunks repeat the same strings everywhere, and a naive grep drowns
+  the inventory in them. I separate the two by frequency and file name:
+  vendor chunks repeat the same literals, while application chunks carry
+  route strings that appear only a handful of times.</p>
+  <pre>grep -rhoE '"(/[a-z0-9-]+){1,3}"' bundles/*.js \
+  | sort | uniq -c | sort -nr | head -n 50</pre>
+  <p>I read that list from the bottom up. The rare, specific strings are the
+  application's own surface; the strings at the top, repeated hundreds of
+  times, are usually framework plumbing. When a string is ambiguous, I search
+  for it in context in the one bundle that contains it, instead of guessing
+  from the grep output alone.</p>
+
+  <h2>4. Turn the hits into an inventory, not a pile</h2>
+  <p>Raw grep output is not an inventory. For each distinct path I record, in
+  the dated engagement notes: the path, the bundle file it came from, any
+  method or parameter seen next to it, and the status — unknown. Nothing else.
+  No severity, no claim, no assumption that the path answers, requires
+  authentication, or even still exists on the server. Bundles go stale,
+  feature flags hide routes, and dead code ships.</p>
+  <p>I also record what I did <em>not</em> collect: pages behind a login I had
+  not yet reached, chunks loaded only after an interaction, and any host I
+  excluded as out of scope. When the session state changes — after a login,
+  for example — I repeat the collection, because the authenticated bundle set
+  is often larger than the public one.</p>
+
+  <h2>What this gives you</h2>
+  <p>After this pass I hold a map drawn by the application itself: its API
+  paths, its version prefixes, its auth vocabulary, and the routes its front
+  end knows about. Each later probe starts from a named endpoint with a
+  recorded source, instead of from a guess. Rebuild the inventory
+  every time the application redeploys — hashed filenames will tell you when
+  it has.</p>
+
+  <div class="callout">
+    <strong>Disclosure note.</strong> Techniques described here are methodology only.
+    Specific findings from live engagements are reported privately to the vendor first
+    and published here only after remediation or explicit permission.
+  </div>
+
+  <a class="back-link" href="index.html">← all write-ups</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>
