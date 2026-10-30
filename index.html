@@ -29,6 +29,12 @@
   <section>
     <h2 class="section-title">Latest write-ups</h2>
     <div class="cards">
+      <a class="card" href="writeups/response-diffing.html">
+        <span class="card-tag">technique</span>
+        <h3>Diffing responses to find the interesting ones</h3>
+        <p>Same request, one mutated parameter, diff the responses — identical answers mean a dead end, different answers mean a thread worth pulling, one curl at a time.</p>
+        <span class="card-date">2026-10-30</span>
+      </a>
       <a class="card" href="writeups/js-bundle-endpoints.html">
         <span class="card-tag">technique</span>
         <h3>Harvesting endpoints from JavaScript bundles</h3>
@@ -58,12 +64,6 @@
         <h3>Servos need their own power supply</h3>
         <p>An ESP32 that resets every time a servo moves is usually not a code bug: the servo is dragging the shared 5V rail down. Give servos their own supply, join the grounds, and the resets stop.</p>
         <span class="card-date">2026-10-25</span>
-      </a>
-      <a class="card" href="writeups/esp32-adc-vs-wifi.html">
-        <span class="card-tag">tooling</span>
-        <h3>ESP32 ADC2 goes blind when WiFi starts</h3>
-        <p>The WiFi driver claims ADC2, so analog reads on its pins return garbage once WiFi is up — move joysticks and sensors to ADC1 pins 32–39.</p>
-        <span class="card-date">2026-10-24</span>
       </a>
     </div>
   </section>

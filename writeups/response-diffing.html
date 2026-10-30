@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Diffing responses to find the interesting ones — D3BUG.REG</title>
+<meta name="description" content="Same request, one mutated parameter, diff the responses: identical answers mean a dead end, different answers mean a thread worth pulling, one curl at a time.">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> cat response-diffing.md &nbsp;·&nbsp; 2026-10-30 &nbsp;·&nbsp; technique</p>
+  <h1>Diffing responses to find the interesting ones</h1>
+
+  <p>Most of my manual testing is comparative. I send one request, save the
+  response, change exactly one thing, send it again, and compare the two answers
+  side by side. The server usually tells you whether a parameter matters — not in
+  words, but in the difference between two responses. Response diffing is how I
+  listen for that difference without guessing.</p>
+
+  <div class="callout">
+    <strong>Scope first.</strong> Everything below assumes written authorization for the
+    target. No scope, no testing — that rule is non-negotiable in my workflow.
+  </div>
+
+  <h2>1. Capture a baseline first</h2>
+  <p>A diff is only meaningful if the first response is a known good one. Before I
+  mutate anything, I capture the baseline: the request exactly as the application
+  itself sends it, with a valid session where one is needed, saving both body and
+  headers to files. Reading a response in a terminal and trying to remember it is
+  not a baseline. A file is.</p>
+  <pre>curl -s "https://target.example.com/api/profile" \
+  -H "Authorization: Bearer $TOKEN" \
+  -o baseline.body -D baseline.headers \
+  -w "%{http_code} %{size_download}\n"
+cat baseline.body | head -c 600; echo</pre>
+  <p>The <code>-w</code> line gives me the status code and the size at a glance. A
+  sudden size change is often the first hint that a mutation did something, though
+  size alone is crude — two responses can be the same length and completely
+  different. The files are what I actually compare later.</p>
+
+  <h2>2. Change exactly one thing</h2>
+  <p>The discipline of diffing is the discipline of the single variable. If I change
+  the parameter, the session, and the headers all at once, a different response tells
+  me nothing about which change caused it. So I copy the baseline request and change
+  one parameter, one header, or one value — and nothing else:</p>
+  <pre>curl -s "https://target.example.com/api/profile?view=summary" \
+  -H "Authorization: Bearer $TOKEN" \
+  -o mutated.body -D mutated.headers \
+  -w "%{http_code} %{size_download}\n"
+diff -u baseline.body mutated.body | head -60</pre>
+  <p>I run the same pattern for the other comparisons that matter: unauthenticated
+  versus authenticated, one role versus another, a parameter present versus removed.
+  Each pair is one question, answered by one diff. When a diff is empty, that is an
+  answer too: the input I changed had no observable effect here. I note it and
+  move on instead of retrying the same mutation louder.</p>
+
+  <h2>3. Normalize before you compare</h2>
+  <p>Raw diffs lie. Timestamps, request IDs, CSRF tokens, and session cookies change
+  on every response, and they will fill a diff with noise that hides the one line
+  that matters. Before comparing JSON bodies, I normalize them: sort the keys,
+  pretty-print them, and drop the fields that are different every time. The same
+  idea applies to headers — date and set-cookie lines are expected to move.</p>
+  <pre>jq -S 'del(.timestamp, .requestId, .traceId)' baseline.body &gt; baseline.norm
+jq -S 'del(.timestamp, .requestId, .traceId)' mutated.body &gt; mutated.norm
+diff -u baseline.norm mutated.norm
+
+grep -viE '^(date|set-cookie|x-request-id):' baseline.headers &gt; baseline.hdr
+grep -viE '^(date|set-cookie|x-request-id):' mutated.headers &gt; mutated.hdr
+diff -u baseline.hdr mutated.hdr</pre>
+  <p>Normalizing is a judgment call, and I write down which fields I dropped. If I
+  delete a field from both sides, I cannot later claim it never changed. The
+  normalized files are a working view; the raw files stay untouched so I can always
+  go back and check what I filtered out.</p>
+
+  <h2>4. Read the diff, not just its length</h2>
+  <p>A short diff can be the most interesting result of the day, and a long diff can
+  mean nothing. I look for, in order: a status-code change, a different error
+  message or code, a field that appears or disappears, a value that changes shape
+  — a string becoming a number, an object becoming null, a list gaining an entry.
+  Those structural differences are where behavior shows. A long diff of only
+  reordered keys or fresh timestamps is noise, and normalizing usually removes it.</p>
+  <p>I also compare what is <em>absent</em>. If the baseline returns a field and the
+  mutated response drops it silently, or a specific error becomes generic, that
+  change in shape is information even when no new data appears. A different
+  response is never proof of a vulnerability — only a thread, a reason to read the
+  surrounding code and decide whether a careful follow-up is warranted.</p>
+
+  <h2>5. Keep the pairs, and keep them dated</h2>
+  <p>Every comparison gets a small, boring folder discipline: baseline and mutated
+  files with matching names, a one-line note saying what changed and what the diff
+  showed, and the date. Two weeks later, "the profile endpoint behaved oddly" is
+  worthless. A dated note — "2026-10-30: view=summary dropped the email field,
+  status stayed 200" — is something I can act on, reproduce, or close.</p>
+  <pre>mkdir -p notes/2026-10-30-profile-view
+cp baseline.body mutated.body notes/2026-10-30-profile-view/
+echo "view=summary: email field absent, status 200 both sides" \
+  &gt;&gt; notes/2026-10-30-profile-view/README</pre>
+  <p>This is slow work by design. One request at a time, one diff at a time, every
+  response actually read. It keeps the signal high, the noise near zero, and the
+  notes honest — because the notes describe responses I saved, not responses I
+  half-remember.</p>
+
+  <h2>What this gives you</h2>
+  <p>Response diffing turns vague curiosity into a repeatable test: same request,
+  one change, saved files, a normalized diff, a dated note. Most dead ends are
+  found this way, cheaply, in seconds — and the threads that survive the diff are
+  worth the slower work that follows. When a response does not change, believe it.
+  When it does, read the exact lines that changed before deciding what they mean.</p>
+
+  <div class="callout">
+    <strong>Disclosure note.</strong> Techniques described here are methodology only.
+    Specific findings from live engagements are reported privately to the vendor first
+    and published here only after remediation or explicit permission.
+  </div>
+
+  <a class="back-link" href="index.html">← all write-ups</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>
