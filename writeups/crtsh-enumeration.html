@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Subdomain enumeration with crt.sh — D3BUG.REG</title>
+<meta name="description" content="Query certificate transparency logs with crt.sh, clean the list, resolve what answers, and build a scoped target list before any probing.">
+<link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html"><span class="dim">[</span>D3BUG.REG<span class="dim">]</span></a>
+    <nav>
+      <a href="index.html">Write-ups</a>
+      <a href="../about.html">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container article">
+  <p class="article-meta"><span class="prompt">$</span> cat crtsh-enumeration.md &nbsp;·&nbsp; 2026-10-31 &nbsp;·&nbsp; technique</p>
+  <h1>Subdomain enumeration with crt.sh</h1>
+
+  <p>Before I send a single probe, I want a map of the target. Subdomain
+  enumeration is how I build the first version of that map, and Certificate
+  Transparency logs are the fastest free source for it. One public query
+  returns the names that have appeared on certificates for a domain — no
+  account, no API key, no scanner. This post covers the query I run, how
+  I clean the result, and how I turn it into a target list I can trust.</p>
+
+  <div class="callout">
+    <strong>Scope first.</strong> Everything here assumes written authorization for the
+    target. No scope, no recon.
+  </div>
+
+  <h2>1. Why certificate transparency</h2>
+  <p>When a certificate authority issues a certificate, the certificate is
+  normally logged in public Certificate Transparency logs. Each log entry
+  names the domains the certificate covers. That makes the logs a public,
+  queryable record of names an organization has put certificates on: the
+  main site, its API hosts, staging environments, and services that were
+  never linked from anywhere. I am not guessing names or brute-forcing
+  wordlists. I am reading a public log. The query is one ordinary HTTPS
+  request, it touches no target infrastructure, and it produces a list I
+  can review before deciding anything else.</p>
+
+  <h2>2. One query, no API key</h2>
+  <p>The query uses crt.sh, the public Certificate Transparency search
+  interface. The <code>%25.</code> prefix is the URL-encoded wildcard, so the
+  search returns nested subdomains as well as direct ones, and
+  <code>output=json</code> gives structured data I can filter with
+  <code>jq</code>:</p>
+  <pre>curl -s "https://crt.sh/?q=%25.example.com&amp;output=json" \
+  | jq -r '.[].name_value' \
+  | sed 's/\*\.//g' | sort -u &gt; subdomains.txt
+wc -l subdomains.txt</pre>
+  <p>Three details in that pipeline do real work. First,
+  <code>name_value</code> can hold several names separated by newlines, so
+  <code>jq -r</code> expands one entry into several lines. Second,
+  <code>sed 's/\*\.//g'</code> strips the wildcard prefix, turning
+  <code>*.api.example.com</code> into <code>api.example.com</code> — the
+  name I would actually resolve. Third, <code>sort -u</code> deduplicates:
+  the same name appears on many certificates, and a list with each name
+  repeated twenty times is noise. I save the result to
+  <code>subdomains.txt</code> in the engagement folder, with the date in
+  my notes, because this file becomes the seed for everything that
+  follows.</p>
+
+  <h2>3. Clean the list before you trust it</h2>
+  <p>The raw output is never ready to use as-is. I read it first, then
+  clean it deliberately. Entries outside the authorized scope go out
+  immediately, even if they look interesting — scope is decided in
+  writing before recon starts, not renegotiated because a name looks
+  promising. I also check for casing and trailing whitespace, for names
+  that belong to a different domain that merely shares a suffix, and for
+  entries that are clearly not hostnames. A short manual pass now is
+  cheaper than chasing a phantom host later:</p>
+  <pre>grep -v '\.example\.com$' subdomains.txt   # anything that should not be here
+sort -u subdomains.txt -o subdomains.txt
+wc -l subdomains.txt</pre>
+
+  <h2>4. Separate the living from the dead</h2>
+  <p>A list of hundreds of names is still mostly noise. Many certificates
+  outlive the services they covered, and many names resolve to nothing.
+  So the next step is resolution: keep only the names that answer. When
+  the local resolver is unreliable — a filtered network, a captive
+  portal — I resolve over HTTPS instead, one name at a time:</p>
+  <pre>curl -s "https://cloudflare-dns.com/dns-query?name=api.example.com&amp;type=A" \
+  -H "accept: application/dns-json" | jq -r '.Answer[].data'</pre>
+  <p>A name with no answer is a dead end for now, and I note it as such
+  rather than deleting it silently: a name that is dead today may not be
+  dead next month. For names that do answer, I pin the resolved IP with
+  <code>curl --resolve</code> so the rest of the tooling keeps working
+  even when the system resolver is broken. Only the living, in-scope
+  names move on to the next phase.</p>
+
+  <h2>5. What crt.sh does not show you</h2>
+  <p>This method has honest limits. It only finds names that appeared on
+  certificates, so a service with no certificate will not appear. It
+  shows history as well as the present, so retired names sit next to
+  live ones until resolution sorts them out. And a wildcard entry tells
+  me a pattern exists, not that any particular host under it does. None
+  of that makes the list useless — it makes it a starting point. I treat
+  <code>subdomains.txt</code> as a hypothesis to verify, not as a proven
+  inventory, and I never present a name from this list as vulnerable or
+  exposed. It is a name on a public log, nothing more, until I have
+  observed something myself, inside scope, at a human pace.</p>
+
+  <h2>6. Feeding the next step</h2>
+  <p>The cleaned, resolved list is the input to the rest of recon. The
+  live hosts are where I collect JavaScript bundles and grep them for
+  endpoints, and where I trace auth flows in minified code — the steps
+  covered in earlier posts in this series. A sloppy list here propagates
+  everywhere: a missed name means a missed bundle. That is why the first
+  hour of an engagement is mostly this quiet work — one query, a careful
+  cleanup, resolution, notes. Just a map, built from a public record,
+  checked name by name, and written down before anything else happens.</p>
+
+  <div class="callout">
+    <strong>Disclosure note.</strong> Techniques described here are methodology only.
+    Specific findings from live engagements are reported privately to the vendor first
+    and published here only after remediation or explicit permission.
+  </div>
+
+  <a class="back-link" href="index.html">← all write-ups</a>
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <span>D3BUG.REG — research notes</span>
+    <span>Authorized targets only.</span>
+  </div>
+</footer>
+</body>
+</html>
